@@ -15,6 +15,7 @@ const hashPassword = (password: string): string => {
 
 const verifyPassword = (password: string, hash: string): boolean => {
   const [salt, key] = hash.split(':');
+  if (!salt || !key) return false;
   const derivedKey = crypto.scryptSync(password, salt, 64).toString('hex');
   return key === derivedKey;
 };

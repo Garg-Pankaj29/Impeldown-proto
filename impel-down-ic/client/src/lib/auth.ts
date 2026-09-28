@@ -4,6 +4,7 @@
 
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { API_BASE } from '../services/api';
 
 export type Role = 'guard' | 'responder' | 'warden';
 
@@ -28,7 +29,7 @@ export const useAuthStore = create<AuthState>()(
 
       login: async (email: string, password: string) => {
         try {
-          const res = await fetch('/api/auth/login', {
+          const res = await fetch(`${API_BASE}/api/auth/login`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email, password }),
@@ -53,7 +54,7 @@ export const useAuthStore = create<AuthState>()(
 
       register: async (email: string, password: string, role: Role) => {
         try {
-          const res = await fetch('/api/auth/register', {
+          const res = await fetch(`${API_BASE}/api/auth/register`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email, password, role }),
@@ -72,7 +73,7 @@ export const useAuthStore = create<AuthState>()(
 
       registerResponder: async (payload: any) => {
         try {
-          const res = await fetch('/api/auth/register-responder', {
+          const res = await fetch(`${API_BASE}/api/auth/register-responder`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),

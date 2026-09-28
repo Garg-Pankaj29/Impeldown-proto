@@ -9,8 +9,23 @@ import { config } from './config/env';
 const app = express();
 
 // ── Middleware ───────────────────────────────────────────────
-app.use(helmet());
-app.use(cors({ origin: config.CLIENT_ORIGIN }));
+app.use(helmet({ crossOriginResourcePolicy: false }));
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (
+      !config.CLIENT_ORIGIN ||
+      config.CLIENT_ORIGIN === '*' ||
+      origin === config.CLIENT_ORIGIN ||
+      origin.endsWith('.vercel.app') ||
+      origin.includes('localhost')
+    ) {
+      return callback(null, true);
+    }
+    return callback(null, true);
+  },
+  credentials: true,
+}));
 app.use(express.json());
 
 // ── API Routes ────────────────────────────────────────────────

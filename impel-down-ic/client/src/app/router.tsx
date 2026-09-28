@@ -82,7 +82,7 @@ function RoleBasedRedirect() {
   if (role === 'responder') {
     return <Navigate to="/response-team" replace />;
   }
-  if (role === 'admin') {
+  if (role === 'warden') {
     return <Navigate to="/admin" replace />;
   }
   return <Navigate to="/login" replace />;

@@ -74,4 +74,5 @@ class SSEClient {
   }
 }
 
-export const sse = new SSEClient('/api/stream');
+import { API_BASE } from './api';
+export const sse = new SSEClient(`${API_BASE}/api/stream`);

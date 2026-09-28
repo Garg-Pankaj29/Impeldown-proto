@@ -26,7 +26,17 @@ const COLORS = {
   borderLight: '#E8D5B8',
 };
 
-const PRIORITY_CONFIG: Record<number, { label: string; color: string; bg: string; border: string; icon: string }> = {
+interface PriorityConfig {
+  label: string;
+  color: string;
+  bg: string;
+  border: string;
+  icon: string;
+}
+
+const DEFAULT_PRIORITY: PriorityConfig = { label: 'Medium', color: '#fff', bg: '#E8A317', border: '#C78F14', icon: '🔧' };
+
+const PRIORITY_CONFIG: Record<number, PriorityConfig> = {
   6: { label: 'Critical', color: '#fff', bg: '#D71920', border: '#B8151C', icon: '🚨' },
   5: { label: 'Critical', color: '#fff', bg: '#D71920', border: '#B8151C', icon: '🚨' },
   4: { label: 'High', color: '#fff', bg: '#F39C12', border: '#D68910', icon: '⚠️' },
@@ -42,7 +52,7 @@ const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string }
   RESOLVED: { label: 'Resolved', color: '#10B981', bg: '#D1FAE5' },
 };
 
-const getPriority = (level: number) => PRIORITY_CONFIG[level] || PRIORITY_CONFIG[3];
+const getPriority = (level: number): PriorityConfig => PRIORITY_CONFIG[level] ?? DEFAULT_PRIORITY;
 const getStatus = (status: string) => STATUS_CONFIG[status] || { label: status, color: '#666', bg: '#f0f0f0' };
 
 /* ═══════════════════════════════════════════════════════════════

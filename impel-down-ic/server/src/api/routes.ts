@@ -12,7 +12,7 @@ import {
   assignTeamSchema,
 } from '../schemas/incident.schema';
 import { computeDeadline, remainingMs, isOverdue, urgency, slaDurationMs } from '../domain/sla';
-import { validateTransition, Status, EventType, LEVEL_NAMES, ALL_CATEGORIES, Category } from '../domain/incident';
+import { validateTransition, Status, StatusValue, EventType, LEVEL_NAMES, ALL_CATEGORIES, Category } from '../domain/incident';
 import { clock } from '../services/clock';
 import { eventBus, EventBusTypes } from '../services/events';
 
@@ -322,7 +322,7 @@ router.patch('/incidents/:id/status', authenticate, validateBody(updateStatusSch
         return res.status(404).json({ error: 'Not found' });
       }
 
-      validateTransition(inc.status as Status, newStatus);
+      validateTransition(inc.status as StatusValue, newStatus);
       
       const now = new Date(clock.now()).toISOString();
       let query = 'UPDATE incidents SET status = $1, version = version + 1 ';
@@ -440,7 +440,7 @@ router.post('/incidents/:id/resolve', authenticate, async (req: AuthRequest, res
         return res.status(404).json({ error: 'Not found' });
       }
 
-      validateTransition(inc.status as Status, Status.RESOLVED);
+      validateTransition(inc.status as StatusValue, Status.RESOLVED);
       
       const now = new Date(clock.now()).toISOString();
       const updatedRes = await client.query(`

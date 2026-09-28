@@ -2,9 +2,11 @@
 // Follows docs/architecture.md
 
 import { Pool } from 'pg';
+import Database from 'better-sqlite3';
 import { config } from '../config/env';
 
 let pool: Pool | null = null;
+let db: any = null;
 
 /** Get (or create) the singleton DB connection */
 export function getDb(): Pool {
