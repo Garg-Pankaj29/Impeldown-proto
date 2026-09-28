@@ -36,13 +36,22 @@ import { errorHandler } from './api/middlewares';
 app.use('/api', apiRouter);
 app.use('/api/auth', authRouter);
 
-// ── Health ──────────────────────────────────────────────────
+// ── Health & Seed ──────────────────────────────────────────
 app.get('/api/health', (_req, res) => {
   res.json({
     status: 'ok',
     service: 'impel-down-ic',
     timestamp: new Date().toISOString(),
   });
+});
+
+app.get('/api/seed', async (_req, res) => {
+  try {
+    await seed();
+    res.json({ status: 'ok', message: 'Database successfully seeded!' });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.use(errorHandler);
@@ -72,20 +81,33 @@ if (fs.existsSync(indexHtmlPath)) {
       status: 'online',
       version: '1.0.0',
       health: '/api/health',
+      seed: '/api/seed',
     });
   });
 }
 // ── Start ───────────────────────────────────────────────────
 import { ticker } from './services/scheduler';
 import { migrate } from './db/migrate';
+import { seed } from './db/seed';
+import { getDb } from './db/client';
 
 let server: ReturnType<typeof app.listen> | null = null;
 
 // Only start listening when run directly (not imported by tests)
 if (process.env.NODE_ENV !== 'test') {
-  server = app.listen(config.PORT, () => {
+  server = app.listen(config.PORT, async () => {
     console.log(`⚓ Impel Down Command Center running on port ${config.PORT}`);
-    migrate().catch(console.error);
+    try {
+      await migrate();
+      const db = getDb();
+      const countRes = await db.query('SELECT COUNT(*) FROM teams');
+      if (parseInt(countRes.rows[0].count, 10) === 0) {
+        console.log('🌱 Database is empty, seeding initial teams and incidents...');
+        await seed();
+      }
+    } catch (err) {
+      console.error('Migration / Seed error:', err);
+    }
     ticker.start();
   });
 }
