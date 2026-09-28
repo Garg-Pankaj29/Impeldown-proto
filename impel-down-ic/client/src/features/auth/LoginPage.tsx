@@ -114,8 +114,10 @@ export default function LoginPage() {
   /* ── Validation ─────────────────────────────────────────────── */
   function validate(): boolean {
     const errs: typeof errors = {};
-    if (!email.trim()) errs.email = 'Email is required';
-    else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) errs.email = 'Enter a valid email';
+    const idLabel = selectedRole === 'Response Team' ? 'Team ID' : 'Email';
+    if (!email.trim()) errs.email = `${idLabel} is required`;
+    else if (selectedRole === 'Reporter' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) errs.email = 'Enter a valid email';
+    
     if (!password.trim()) errs.password = 'Password is required';
     else if (password.length < 4) errs.password = 'Must be at least 4 characters';
     setErrors(errs);
@@ -272,17 +274,23 @@ export default function LoginPage() {
               </div>
             )}
             
-            {/* Email */}
+            {/* Email / Team ID */}
             <div>
               <div className={`relative flex items-center border rounded-lg transition-colors ${errors.email ? 'border-[#e11d48]' : 'border-gray-300 focus-within:border-marine'}`}>
-                <svg className="absolute left-3 w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25h-15a2.25 2.25 0 0 1-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.243a2.25 2.25 0 0 1-1.07 1.916l-7.5 4.615a2.25 2.25 0 0 1-2.36 0L3.32 8.91a2.25 2.25 0 0 1-1.07-1.916V6.75" />
-                </svg>
+                {selectedRole === 'Response Team' ? (
+                  <svg className="absolute left-3 w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M15 19.128a9.38 9.38 0 0 0 2.625.372 9.337 9.337 0 0 0 4.121-.952 4.125 4.125 0 0 0-7.533-2.493M15 19.128v-.003c0-1.113-.285-2.16-.786-3.07M15 19.128v.106A12.318 12.318 0 0 1 8.624 21c-2.331 0-4.512-.645-6.374-1.766l-.001-.109a6.375 6.375 0 0 1 11.964-3.07M12 6.375a3.375 3.375 0 1 1-6.75 0 3.375 3.375 0 0 1 6.75 0Zm8.25 2.25a2.625 2.625 0 1 1-5.25 0 2.625 2.625 0 0 1 5.25 0Z" />
+                  </svg>
+                ) : (
+                  <svg className="absolute left-3 w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5} aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 0 1-2.25 2.25h-15a2.25 2.25 0 0 1-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0 0 19.5 4.5h-15a2.25 2.25 0 0 0-2.25 2.25m19.5 0v.243a2.25 2.25 0 0 1-1.07 1.916l-7.5 4.615a2.25 2.25 0 0 1-2.36 0L3.32 8.91a2.25 2.25 0 0 1-1.07-1.916V6.75" />
+                  </svg>
+                )}
                 <input
                   id="email"
-                  type="email"
-                  placeholder="Email address"
-                  autoComplete="email"
+                  type={selectedRole === 'Response Team' ? 'text' : 'email'}
+                  placeholder={selectedRole === 'Response Team' ? 'Enter your Team ID' : 'Email address'}
+                  autoComplete={selectedRole === 'Response Team' ? 'off' : 'email'}
                   value={email}
                   onChange={(e) => { setEmail(e.target.value); if (errors.email) setErrors((p) => ({ ...p, email: undefined })); }}
                   className="w-full py-3 pl-11 pr-4 rounded-lg text-sm text-gray-800 placeholder-gray-400 bg-transparent focus:outline-none"
@@ -302,7 +310,7 @@ export default function LoginPage() {
                 <input
                   id="password"
                   type={showPassword ? 'text' : 'password'}
-                  placeholder="Password"
+                  placeholder={selectedRole === 'Response Team' ? 'Enter your Team Password' : 'Password'}
                   autoComplete="current-password"
                   value={password}
                   onChange={(e) => { setPassword(e.target.value); if (errors.password) setErrors((p) => ({ ...p, password: undefined })); }}
@@ -376,37 +384,52 @@ export default function LoginPage() {
           {/* ── Footer ─────────────────────────────────────── */}
           <div className="mt-6 flex flex-col items-center">
             <JollyRogerSmall className="opacity-40 mb-3" />
-            <button 
-              type="button"
-              onClick={() => {
-                if (!isRegisterMode && rolePath === 'response-team') {
-                  navigate('/apply/response-team');
-                } else {
-                  setIsRegisterMode(!isRegisterMode);
-                }
-              }}
-              className="flex items-center gap-3 bg-gray-100 hover:bg-gray-200 transition-colors rounded-lg p-3 w-full text-left"
-            >
-              <svg className="w-8 h-8 text-gray-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                {isRegisterMode ? (
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
-                ) : (
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.094 9.094 0 0 0 3.741-.479 3 3 0 0 0-4.682-2.72m.94 3.198.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0 1 12 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 0 1 6 18.719m12 0a5.971 5.971 0 0 0-.941-3.197m0 0A5.995 5.995 0 0 0 12 12.75a5.995 5.995 0 0 0-5.058 2.772m0 0a3 3 0 0 0-4.681 2.72 8.986 8.986 0 0 0 3.74.477m.94-3.197a5.971 5.971 0 0 0-.94 3.197M15 6.75a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm6 3a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Zm-13.5 0a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Z" />
-                )}
-              </svg>
-              <div>
-                <p className="text-sm font-bold text-gray-700">
-                  {isRegisterMode ? 'Already have an account?' : 'New member?'}
-                </p>
-                <p className="text-xs text-gray-500">
-                  {isRegisterMode 
-                    ? 'Log in to Impel Down Command' 
-                    : rolePath === 'response-team' 
-                      ? 'Apply to join the Response Team'
-                      : 'Create an account to get access'}
-                </p>
+            
+            {selectedRole === 'Response Team' ? (
+              <div className="flex items-center justify-between bg-[#f4f7fb] border border-gray-200 rounded-lg p-3 w-full">
+                <div className="flex items-center gap-3">
+                  <svg className="w-8 h-8 text-gray-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.094 9.094 0 0 0 3.741-.479 3 3 0 0 0-4.682-2.72m.94 3.198.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0 1 12 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 0 1 6 18.719m12 0a5.971 5.971 0 0 0-.941-3.197m0 0A5.995 5.995 0 0 0 12 12.75a5.995 5.995 0 0 0-5.058 2.772m0 0a3 3 0 0 0-4.681 2.72 8.986 8.986 0 0 0 3.74.477m.94-3.197a5.971 5.971 0 0 0-.94 3.197M15 6.75a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm6 3a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Zm-13.5 0a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Z" />
+                  </svg>
+                  <div>
+                    <p className="text-sm font-bold text-gray-700">New member?</p>
+                    <p className="text-[11px] text-gray-500">Contact your administrator to get access.</p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => navigate('/apply/response-team')}
+                  className="flex items-center gap-1.5 border border-indigo-200 bg-white hover:bg-indigo-50 text-indigo-700 text-xs font-bold py-1.5 px-3 rounded shadow-sm transition-colors"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                  </svg>
+                  Apply for Response Team
+                </button>
               </div>
-            </button>
+            ) : (
+              <button 
+                type="button"
+                onClick={() => setIsRegisterMode(!isRegisterMode)}
+                className="flex items-center gap-3 bg-[#f4f7fb] hover:bg-[#eaf0f7] transition-colors rounded-lg p-3 w-full text-left"
+              >
+                <svg className="w-8 h-8 text-gray-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
+                  {isRegisterMode ? (
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 6a3.75 3.75 0 1 1-7.5 0 3.75 3.75 0 0 1 7.5 0ZM4.501 20.118a7.5 7.5 0 0 1 14.998 0A17.933 17.933 0 0 1 12 21.75c-2.676 0-5.216-.584-7.499-1.632Z" />
+                  ) : (
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.094 9.094 0 0 0 3.741-.479 3 3 0 0 0-4.682-2.72m.94 3.198.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0 1 12 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 0 1 6 18.719m12 0a5.971 5.971 0 0 0-.941-3.197m0 0A5.995 5.995 0 0 0 12 12.75a5.995 5.995 0 0 0-5.058 2.772m0 0a3 3 0 0 0-4.681 2.72 8.986 8.986 0 0 0 3.74.477m.94-3.197a5.971 5.971 0 0 0-.94 3.197M15 6.75a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm6 3a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Zm-13.5 0a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Z" />
+                  )}
+                </svg>
+                <div>
+                  <p className="text-sm font-bold text-gray-700">
+                    {isRegisterMode ? 'Already have an account?' : 'New member?'}
+                  </p>
+                  <p className="text-[11px] text-gray-500">
+                    {isRegisterMode ? 'Log in to Impel Down Command' : 'Create an account to get access'}
+                  </p>
+                </div>
+              </button>
+            )}
           </div>
         </div>
       </div>

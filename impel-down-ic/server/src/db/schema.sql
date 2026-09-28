@@ -2,14 +2,14 @@
 -- Follows docs/architecture.md §Data Model
 
 CREATE TABLE IF NOT EXISTS teams (
-  id    INTEGER PRIMARY KEY AUTOINCREMENT,
+  id    SERIAL PRIMARY KEY,
   name  TEXT    NOT NULL UNIQUE,
   tier  INTEGER NOT NULL DEFAULT 0,
   emoji TEXT    NOT NULL DEFAULT '⚔️'
 );
 
 CREATE TABLE IF NOT EXISTS users (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  id            SERIAL PRIMARY KEY,
   email         TEXT    NOT NULL UNIQUE,
   password_hash TEXT    NOT NULL,
   role          TEXT    NOT NULL,
@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS sla_config (
 );
 
 CREATE TABLE IF NOT EXISTS incidents (
-  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  id               SERIAL PRIMARY KEY,
   title            TEXT    NOT NULL,
   description      TEXT    NOT NULL DEFAULT '',
   location         TEXT    NOT NULL DEFAULT 'Unknown',
@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS incidents (
 );
 
 CREATE TABLE IF NOT EXISTS incident_events (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  id          SERIAL PRIMARY KEY,
   incident_id INTEGER NOT NULL REFERENCES incidents(id),
   type        TEXT    NOT NULL,
   actor       TEXT    NOT NULL DEFAULT 'system',
@@ -61,11 +61,21 @@ CREATE INDEX IF NOT EXISTS idx_events_incident_at
   ON incident_events(incident_id, at);
 
 CREATE TABLE IF NOT EXISTS attachments (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  id          SERIAL PRIMARY KEY,
   incident_id INTEGER NOT NULL REFERENCES incidents(id),
   filename    TEXT    NOT NULL,
   url         TEXT    NOT NULL,
   size        INTEGER NOT NULL,
   mime_type   TEXT    NOT NULL,
   created_at  TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS response_team_details (
+  id SERIAL PRIMARY KEY,
+  team_id INTEGER REFERENCES teams(id),
+  specialty TEXT,
+  shift TEXT,
+  contact_number TEXT,
+  status TEXT DEFAULT 'AVAILABLE',
+  notes TEXT
 );

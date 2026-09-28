@@ -13,6 +13,7 @@ interface AuthState {
   token: string | null;
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string, role: Role) => Promise<void>;
+  registerResponder: (data: any) => Promise<void>;
   logout: () => void;
 }
 
@@ -32,7 +33,16 @@ export const useAuthStore = create<AuthState>()(
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email, password }),
           });
-          if (!res.ok) throw new Error('Login failed');
+          if (!res.ok) {
+            let errorMsg = 'Login failed';
+            try {
+              const d = await res.json();
+              if (d.error) {
+                errorMsg = typeof d.error === 'string' ? d.error : d.error.message || errorMsg;
+              }
+            } catch (e) {}
+            throw new Error(errorMsg);
+          }
           const data = await res.json();
           set({ isAuthenticated: true, user: data.user, token: data.token });
         } catch (e) {
@@ -47,6 +57,25 @@ export const useAuthStore = create<AuthState>()(
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email, password, role }),
+          });
+          if (!res.ok) {
+            const d = await res.json();
+            throw new Error(d.error || 'Registration failed');
+          }
+          const data = await res.json();
+          set({ isAuthenticated: true, user: data.user, token: data.token });
+        } catch (e) {
+          console.error(e);
+          throw e;
+        }
+      },
+
+      registerResponder: async (payload: any) => {
+        try {
+          const res = await fetch('/api/auth/register-responder', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
           });
           if (!res.ok) {
             const d = await res.json();

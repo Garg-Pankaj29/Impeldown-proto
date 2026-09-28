@@ -100,25 +100,30 @@ router.get('/stream', (req: Request, res: Response) => {
 });
 
 // ── GET /api/teams ───────────────────────────────────────────
-router.get('/teams', (req: Request, res: Response) => {
+router.get('/teams', async (req: Request, res: Response) => {
   const db = getDb();
-  const teams = db.prepare('SELECT * FROM teams ORDER BY tier, id').all();
-  res.json(teams);
+  const { rows } = await db.query('SELECT * FROM teams ORDER BY tier, id');
+  res.json(rows);
 });
 
 // ── GET /api/stats ───────────────────────────────────────────
-router.get('/stats', (req: Request, res: Response) => {
+router.get('/stats', async (req: Request, res: Response) => {
   const db = getDb();
-  const counts = db.prepare('SELECT status, COUNT(*) as count FROM incidents GROUP BY status').all() as any[];
-  const escalated = db.prepare('SELECT COUNT(*) as count FROM incidents WHERE tier > 0 AND status != ?').get(Status.RESOLVED) as any;
-  const overdueRaw = db.prepare('SELECT deadline_at FROM incidents WHERE status != ?').all(Status.RESOLVED) as any[];
+  const countsRes = await db.query('SELECT status, COUNT(*) as count FROM incidents GROUP BY status');
+  const counts = countsRes.rows;
+  
+  const escalatedRes = await db.query('SELECT COUNT(*) as count FROM incidents WHERE tier > 0 AND status != $1', [Status.RESOLVED]);
+  const escalated = escalatedRes.rows[0];
+  
+  const overdueRes = await db.query('SELECT deadline_at FROM incidents WHERE status != $1', [Status.RESOLVED]);
+  const overdueRaw = overdueRes.rows;
   
   const now = clock.now();
   const overdueCount = overdueRaw.filter(r => isOverdue(new Date(r.deadline_at).getTime(), now)).length;
 
   res.json({
-    counts: counts.reduce((acc, curr) => ({ ...acc, [curr.status]: curr.count }), {}),
-    escalatedCount: escalated.count,
+    counts: counts.reduce((acc, curr) => ({ ...acc, [curr.status]: Number(curr.count) }), {}),
+    escalatedCount: Number(escalated.count),
     overdueCount: overdueCount,
   });
 });
@@ -146,13 +151,14 @@ router.get('/meta', (req: Request, res: Response) => {
 });
 
 // ── GET /api/incidents/mine/stats ───────────────────────────
-router.get('/incidents/mine/stats', authenticate, (req: AuthRequest, res: Response) => {
+router.get('/incidents/mine/stats', authenticate, async (req: AuthRequest, res: Response) => {
   const db = getDb();
-  const reporter = req.user.name;
+  const reporter = req.user!.name;
 
-  const stats = db.prepare(`
-    SELECT status, tier FROM incidents WHERE reporter = ?
-  `).all(reporter) as any[];
+  const statsRes = await db.query(`
+    SELECT status, tier FROM incidents WHERE reporter = $1
+  `, [reporter]);
+  const stats = statsRes.rows;
 
   let myReports = stats.length;
   let inProgress = stats.filter(s => s.status === Status.IN_PROGRESS).length;
@@ -168,67 +174,70 @@ router.get('/incidents/mine/stats', authenticate, (req: AuthRequest, res: Respon
 });
 
 // ── GET /api/incidents ───────────────────────────────────────
-router.get('/incidents', authenticate, (req: AuthRequest, res: Response) => {
+router.get('/incidents', authenticate, async (req: AuthRequest, res: Response) => {
   const { view, mine, q, limit } = req.query;
   const db = getDb();
   let query = 'SELECT * FROM incidents WHERE 1=1 ';
   let params: any[] = [];
+  let paramIndex = 1;
 
   if (mine === '1') {
-    query += 'AND reporter = ? ';
-    params.push(req.user.name);
+    query += `AND reporter = $${paramIndex++} `;
+    params.push(req.user!.name);
   }
 
   if (q) {
-    query += 'AND (title LIKE ? OR location LIKE ? OR id = ?) ';
+    query += `AND (title LIKE $${paramIndex} OR location LIKE $${paramIndex+1} OR id::text = $${paramIndex+2}) `;
     params.push(`%${q}%`, `%${q}%`, q);
+    paramIndex += 3;
   }
 
   if (view === 'escalated') {
-    query += 'AND tier > 0 AND status != ? ';
+    query += `AND tier > 0 AND status != $${paramIndex++} `;
     params.push(Status.RESOLVED);
   } else if (view === 'resolved') {
-    query += 'AND status = ? ';
+    query += `AND status = $${paramIndex++} `;
     params.push(Status.RESOLVED);
   } else if (view === 'active') {
-    query += 'AND status != ? ';
+    query += `AND status != $${paramIndex++} `;
     params.push(Status.RESOLVED);
   }
 
   query += 'ORDER BY created_at DESC ';
   
   if (limit) {
-    query += 'LIMIT ?';
+    query += `LIMIT $${paramIndex++}`;
     params.push(parseInt(limit as string, 10));
   }
 
-  const rows = db.prepare(query).all(...params);
+  const { rows } = await db.query(query, params);
   res.json(rows.map(mapIncident));
 });
 
 // ── GET /api/incidents/:id ───────────────────────────────────
-router.get('/incidents/:id', authenticate, (req: AuthRequest, res: Response) => {
+router.get('/incidents/:id', authenticate, async (req: AuthRequest, res: Response) => {
   const db = getDb();
-  const incident = db.prepare('SELECT * FROM incidents WHERE id = ?').get(req.params.id) as any;
+  const incRes = await db.query('SELECT * FROM incidents WHERE id = $1', [req.params.id]);
+  const incident = incRes.rows[0];
   if (!incident) {
     res.status(404).json({ error: 'Incident not found' });
     return;
   }
   
   // If mine=1 logic is strict, check reporter
-  if (req.query.mine === '1' && incident.reporter !== req.user.name) {
+  if (req.query.mine === '1' && incident.reporter !== req.user!.name) {
     res.status(404).json({ error: 'Incident not found' });
     return;
   }
   
-  const events = db.prepare('SELECT * FROM incident_events WHERE incident_id = ? ORDER BY at ASC').all(req.params.id);
-  const attachments = db.prepare('SELECT * FROM attachments WHERE incident_id = ?').all(req.params.id);
+  const eventsRes = await db.query('SELECT * FROM incident_events WHERE incident_id = $1 ORDER BY at ASC', [req.params.id]);
+  const attachmentsRes = await db.query('SELECT * FROM attachments WHERE incident_id = $1', [req.params.id]);
   
-  res.json({ ...mapIncident(incident), events, attachments });
+  res.json({ ...mapIncident(incident), events: eventsRes.rows, attachments: attachmentsRes.rows });
 });
 
 // ── POST /api/incidents ──────────────────────────────────────
-router.post('/incidents', authenticate, upload.array('photos', 3), (req: AuthRequest, res: Response, next) => {
+router.post('/incidents', authenticate, upload.array('photos', 3), async (req: AuthRequest, res: Response, next) => {
   try {
     let data;
     try {
@@ -253,42 +262,42 @@ router.post('/incidents', authenticate, upload.array('photos', 3), (req: AuthReq
     const level = data.level || 3;
     const deadlineAt = new Date(computeDeadline(now, level)).toISOString();
 
-    const run = db.transaction(() => {
-      const result = db.prepare(`
+    const client = await db.connect();
+    let mapped;
+    try {
+      await client.query('BEGIN');
+      const result = await client.query(`
         INSERT INTO incidents (title, description, location, occurred_at, category, level, reporter, team_id, created_at, deadline_at, version)
-        VALUES (@title, @description, @location, @occurredAt, @category, @level, @reporter, @teamId, @createdAt, @deadlineAt, 1)
-      `).run({
-        ...data,
-        level,
-        reporter: req.user.name,
-        teamId: data.teamId || null,
-        createdAt,
-        deadlineAt,
-      });
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 1)
+        RETURNING *
+      `, [data.title, data.description, data.location, data.occurredAt, data.category, level, req.user!.name, data.teamId || null, createdAt, deadlineAt]);
+      
+      const incident = result.rows[0];
+      const insertId = incident.id;
 
-      const insertId = result.lastInsertRowid;
-
-      // Handle attachments
       if (req.files && Array.isArray(req.files)) {
-        const insertAttachment = db.prepare(`
-          INSERT INTO attachments (incident_id, filename, url, size, mime_type, created_at)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `);
         for (const file of req.files) {
-          insertAttachment.run(insertId, file.originalname, `/uploads/${file.filename}`, file.size, file.mimetype, createdAt);
+          await client.query(`
+            INSERT INTO attachments (incident_id, filename, url, size, mime_type, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+          `, [insertId, file.originalname, `/uploads/${file.filename}`, file.size, file.mimetype, createdAt]);
         }
       }
 
-      db.prepare(`
+      await client.query(`
         INSERT INTO incident_events (incident_id, type, actor, to_value, message, at)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `).run(insertId, EventType.CREATED, req.user.name, Status.REPORTED, 'Incident reported', createdAt);
+        VALUES ($1, $2, $3, $4, $5, $6)
+      `, [insertId, EventType.CREATED, req.user!.name, Status.REPORTED, 'Incident reported', createdAt]);
 
-      return db.prepare('SELECT * FROM incidents WHERE id = ?').get(insertId);
-    });
+      await client.query('COMMIT');
+      mapped = mapIncident(incident);
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
 
-    const incident = run();
-    const mapped = mapIncident(incident);
     eventBus.emitEvent(EventBusTypes.INCIDENT_CREATED, mapped);
     res.status(201).json(mapped);
   } catch (err) {
@@ -297,62 +306,79 @@ router.post('/incidents', authenticate, upload.array('photos', 3), (req: AuthReq
 });
 
 // ── PATCH /api/incidents/:id/status ──────────────────────────
-router.patch('/incidents/:id/status', authenticate, validateBody(updateStatusSchema), (req: Request, res: Response, next) => {
+router.patch('/incidents/:id/status', authenticate, validateBody(updateStatusSchema), async (req: AuthRequest, res: Response, next) => {
   try {
     const db = getDb();
     const { status: newStatus } = req.body;
     
-    const run = db.transaction(() => {
-      const inc = db.prepare('SELECT * FROM incidents WHERE id = ?').get(req.params.id) as any;
-      if (!inc) return null;
+    const client = await db.connect();
+    let updated;
+    try {
+      await client.query('BEGIN');
+      const incRes = await client.query('SELECT * FROM incidents WHERE id = $1 FOR UPDATE', [req.params.id]);
+      const inc = incRes.rows[0];
+      if (!inc) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Not found' });
+      }
 
       validateTransition(inc.status as Status, newStatus);
       
       const now = new Date(clock.now()).toISOString();
-      const updates: any = { status: newStatus, id: req.params.id, now };
-      let query = 'UPDATE incidents SET status = @status, version = version + 1 ';
+      let query = 'UPDATE incidents SET status = $1, version = version + 1 ';
+      const params: any[] = [newStatus, req.params.id, now];
 
       if (newStatus === Status.RESOLVED) {
-        query += ', resolved_at = @now ';
+        query += ', resolved_at = $3 ';
       }
 
-      query += 'WHERE id = @id RETURNING *';
-      const updated = db.prepare(query).get(updates) as any;
+      query += 'WHERE id = $2 RETURNING *';
+      const updatedRes = await client.query(query, newStatus === Status.RESOLVED ? params : [newStatus, req.params.id]);
+      updated = updatedRes.rows[0];
 
-      db.prepare(`
+      await client.query(`
         INSERT INTO incident_events (incident_id, type, actor, from_value, to_value, message, at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(inc.id, newStatus === Status.RESOLVED ? EventType.RESOLVED : EventType.STATUS_CHANGED, 'system', inc.status, newStatus, `Status changed to ${newStatus}`, now);
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `, [inc.id, newStatus === Status.RESOLVED ? EventType.RESOLVED : EventType.STATUS_CHANGED, 'system', inc.status, newStatus, `Status changed to ${newStatus}`, now]);
 
-      return updated;
-    });
-
-    const updated = run();
-    if (!updated) res.status(404).json({ error: 'Not found' });
-    else {
-      const mapped = mapIncident(updated);
-      eventBus.emitEvent(
-        newStatus === Status.RESOLVED ? EventBusTypes.INCIDENT_RESOLVED : EventBusTypes.INCIDENT_UPDATED,
-        mapped
-      );
-      res.json(mapped);
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
     }
+
+    const mapped = mapIncident(updated);
+    eventBus.emitEvent(
+      newStatus === Status.RESOLVED ? EventBusTypes.INCIDENT_RESOLVED : EventBusTypes.INCIDENT_UPDATED,
+      mapped
+    );
+    res.json(mapped);
   } catch (err) {
     next(err);
   }
 });
 
 // ── POST /api/incidents/:id/assign ───────────────────────────
-router.post('/incidents/:id/assign', authenticate, validateBody(assignTeamSchema), (req: Request, res: Response, next) => {
+router.post('/incidents/:id/assign', authenticate, validateBody(assignTeamSchema), async (req: AuthRequest, res: Response, next) => {
   try {
     const db = getDb();
     const { teamId } = req.body;
     
-    const run = db.transaction(() => {
-      const inc = db.prepare('SELECT * FROM incidents WHERE id = ?').get(req.params.id) as any;
-      if (!inc) return null;
+    const client = await db.connect();
+    let updated;
+    try {
+      await client.query('BEGIN');
+      const incRes = await client.query('SELECT * FROM incidents WHERE id = $1 FOR UPDATE', [req.params.id]);
+      const inc = incRes.rows[0];
+      if (!inc) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Not found' });
+      }
       
-      const team = db.prepare('SELECT * FROM teams WHERE id = ?').get(teamId) as any;
+      const teamRes = await client.query('SELECT * FROM teams WHERE id = $1', [teamId]);
+      const team = teamRes.rows[0];
       if (!team) throw new Error('Team not found');
 
       // Auto-transition to ASSIGNED if currently REPORTED
@@ -363,72 +389,83 @@ router.post('/incidents/:id/assign', authenticate, validateBody(assignTeamSchema
       }
 
       const now = new Date(clock.now()).toISOString();
-      const updated = db.prepare(`
+      const updatedRes = await client.query(`
         UPDATE incidents 
-        SET team_id = ?, status = ?, version = version + 1
-        WHERE id = ? RETURNING *
-      `).get(teamId, newStatus, inc.id) as any;
+        SET team_id = $1, status = $2, version = version + 1
+        WHERE id = $3 RETURNING *
+      `, [teamId, newStatus, inc.id]);
+      updated = updatedRes.rows[0];
 
-      db.prepare(`
+      await client.query(`
         INSERT INTO incident_events (incident_id, type, actor, from_value, to_value, message, at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(inc.id, EventType.ASSIGNED, 'system', inc.team_id?.toString() || null, teamId.toString(), `Assigned to team ${team.name}`, now);
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `, [inc.id, EventType.ASSIGNED, 'system', inc.team_id?.toString() || null, teamId.toString(), `Assigned to team ${team.name}`, now]);
 
       if (newStatus !== inc.status) {
-         db.prepare(`
+         await client.query(`
           INSERT INTO incident_events (incident_id, type, actor, from_value, to_value, message, at)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `).run(inc.id, EventType.STATUS_CHANGED, 'system', inc.status, newStatus, `Status changed to ${newStatus}`, now);
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `, [inc.id, EventType.STATUS_CHANGED, 'system', inc.status, newStatus, `Status changed to ${newStatus}`, now]);
       }
 
-      return updated;
-    });
-
-    const updated = run();
-    if (!updated) res.status(404).json({ error: 'Not found' });
-    else {
-      const mapped = mapIncident(updated);
-      eventBus.emitEvent(EventBusTypes.INCIDENT_UPDATED, mapped);
-      res.json(mapped);
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
     }
+
+    const mapped = mapIncident(updated);
+    eventBus.emitEvent(EventBusTypes.INCIDENT_UPDATED, mapped);
+    res.json(mapped);
   } catch (err) {
     next(err);
   }
 });
 
 // ── POST /api/incidents/:id/resolve ──────────────────────────
-router.post('/incidents/:id/resolve', authenticate, (req: Request, res: Response, next) => {
+router.post('/incidents/:id/resolve', authenticate, async (req: AuthRequest, res: Response, next) => {
   try {
     const db = getDb();
     
-    const run = db.transaction(() => {
-      const inc = db.prepare('SELECT * FROM incidents WHERE id = ?').get(req.params.id) as any;
-      if (!inc) return null;
+    const client = await db.connect();
+    let updated;
+    try {
+      await client.query('BEGIN');
+      const incRes = await client.query('SELECT * FROM incidents WHERE id = $1 FOR UPDATE', [req.params.id]);
+      const inc = incRes.rows[0];
+      if (!inc) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Not found' });
+      }
 
       validateTransition(inc.status as Status, Status.RESOLVED);
       
       const now = new Date(clock.now()).toISOString();
-      const updated = db.prepare(`
+      const updatedRes = await client.query(`
         UPDATE incidents 
-        SET status = ?, resolved_at = ?, version = version + 1
-        WHERE id = ? RETURNING *
-      `).get(Status.RESOLVED, now, inc.id) as any;
+        SET status = $1, resolved_at = $2, version = version + 1
+        WHERE id = $3 RETURNING *
+      `, [Status.RESOLVED, now, inc.id]);
+      updated = updatedRes.rows[0];
 
-      db.prepare(`
+      await client.query(`
         INSERT INTO incident_events (incident_id, type, actor, from_value, to_value, message, at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(inc.id, EventType.RESOLVED, 'system', inc.status, Status.RESOLVED, 'Incident resolved', now);
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `, [inc.id, EventType.RESOLVED, 'system', inc.status, Status.RESOLVED, 'Incident resolved', now]);
 
-      return updated;
-    });
-
-    const updated = run();
-    if (!updated) res.status(404).json({ error: 'Not found' });
-    else {
-      const mapped = mapIncident(updated);
-      eventBus.emitEvent(EventBusTypes.INCIDENT_RESOLVED, mapped);
-      res.json(mapped);
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
     }
+
+    const mapped = mapIncident(updated);
+    eventBus.emitEvent(EventBusTypes.INCIDENT_RESOLVED, mapped);
+    res.json(mapped);
   } catch (err) {
     next(err);
   }

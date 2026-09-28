@@ -34,6 +34,10 @@ app.use(errorHandler);
 
 // ── Frontend Serving (Production) ───────────────────────────
 import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Serve static files from the React frontend app
 const clientBuildPath = path.join(__dirname, '../../client/dist');
@@ -55,7 +59,7 @@ let server: ReturnType<typeof app.listen> | null = null;
 if (process.env.NODE_ENV !== 'test') {
   server = app.listen(config.PORT, () => {
     console.log(`⚓ Impel Down Command Center running on port ${config.PORT}`);
-    migrate();
+    migrate().catch(console.error);
     ticker.start();
   });
 }

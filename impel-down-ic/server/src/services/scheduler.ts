@@ -30,11 +30,11 @@ export class EscalationTicker {
   }
 
   /** Run one iteration of the escalation loop */
-  tick() {
+  async tick() {
     if (this.isRunning) return; // Prevent overlapping ticks
     this.isRunning = true;
     try {
-      this.processEscalations();
+      await this.processEscalations();
     } catch (err) {
       console.error('[EscalationTicker] Error during tick:', err);
     } finally {
@@ -42,15 +42,17 @@ export class EscalationTicker {
     }
   }
 
-  processEscalations() {
+  async processEscalations() {
     const db = getDb();
     const now = clock.now();
     
     // Fetch all unresolved incidents
-    const incidents = db.prepare('SELECT * FROM incidents WHERE status != ?').all(Status.RESOLVED) as any[];
+    const res = await db.query('SELECT * FROM incidents WHERE status != $1', [Status.RESOLVED]);
+    const incidents = res.rows;
 
     // Fetch team lookup for assignments
-    const teams = db.prepare('SELECT id, name FROM teams').all() as { id: number, name: string }[];
+    const teamsRes = await db.query('SELECT id, name FROM teams');
+    const teams = teamsRes.rows;
     const getTeamId = (name: string) => teams.find(t => t.name === name)?.id;
 
     for (const inc of incidents) {
@@ -71,55 +73,59 @@ export class EscalationTicker {
         continue; // Nothing to do
       }
 
-      // Process inside a transaction with optimistic concurrency (version checking)
-      const success = db.transaction(() => {
-        // Read current version to ensure it hasn't changed
-        const current = db.prepare('SELECT version FROM incidents WHERE id = ?').get(inc.id) as any;
-        if (!current || current.version !== inc.version) return false;
+      const client = await db.connect();
+      let success: any = false;
 
-        const timestamp = new Date(now).toISOString();
+      try {
+        await client.query('BEGIN');
+        const currentRes = await client.query('SELECT version FROM incidents WHERE id = $1', [inc.id]);
+        const current = currentRes.rows[0];
+        
+        if (current && current.version === inc.version) {
+          const timestamp = new Date(now).toISOString();
 
-        if (needsBusterCall) {
-          const updated = db.prepare(`
-            UPDATE incidents
-            SET buster_called_at = ?, tier = 3, version = version + 1
-            WHERE id = ? AND version = ?
-          `).run(timestamp, inc.id, inc.version);
+          if (needsBusterCall) {
+            const updatedRes = await client.query(`
+              UPDATE incidents
+              SET buster_called_at = $1, tier = 3, version = version + 1
+              WHERE id = $2 AND version = $3
+            `, [timestamp, inc.id, inc.version]);
 
-          if (updated.changes === 0) return false;
+            if (updatedRes.rowCount && updatedRes.rowCount > 0) {
+              await client.query(`
+                INSERT INTO incident_events (incident_id, type, actor, message, at)
+                VALUES ($1, $2, $3, $4, $5)
+              `, [inc.id, EventType.BUSTER_CALL, 'escalation-engine', '🔱 BUSTER CALL INITIATED — 15 minute limit reached or tier 3', timestamp]);
+              success = { type: 'BUSTER_CALL', incidentId: inc.id };
+            }
+          } else if (needsEscalation) {
+            const newTier = nextTier(inc.tier);
+            const teamName = tierTeamName(newTier);
+            const teamId = getTeamId(teamName);
+            const newDeadline = new Date(now + graceMs(inc.level, newTier)).toISOString();
 
-          db.prepare(`
-            INSERT INTO incident_events (incident_id, type, actor, message, at)
-            VALUES (?, ?, ?, ?, ?)
-          `).run(inc.id, EventType.BUSTER_CALL, 'escalation-engine', '🔱 BUSTER CALL INITIATED — 15 minute limit reached or tier 3', timestamp);
+            const updatedRes = await client.query(`
+              UPDATE incidents
+              SET tier = $1, team_id = $2, deadline_at = $3, escalated_at = $4, escalation_count = escalation_count + 1, version = version + 1
+              WHERE id = $5 AND version = $6
+            `, [newTier, teamId, newDeadline, timestamp, inc.id, inc.version]);
 
-          return { type: 'BUSTER_CALL', incidentId: inc.id };
+            if (updatedRes.rowCount && updatedRes.rowCount > 0) {
+              await client.query(`
+                INSERT INTO incident_events (incident_id, type, actor, from_value, to_value, message, at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+              `, [inc.id, EventType.AUTO_ESCALATED, 'escalation-engine', inc.tier.toString(), newTier.toString(), `Auto-escalated to tier ${newTier} (${teamName})`, timestamp]);
+              success = { type: 'ESCALATION', incidentId: inc.id, newTier, teamName };
+            }
+          }
         }
-
-        if (needsEscalation) {
-          const newTier = nextTier(inc.tier);
-          const teamName = tierTeamName(newTier);
-          const teamId = getTeamId(teamName);
-          const newDeadline = new Date(now + graceMs(inc.level, newTier)).toISOString();
-
-          const updated = db.prepare(`
-            UPDATE incidents
-            SET tier = ?, team_id = ?, deadline_at = ?, escalated_at = ?, escalation_count = escalation_count + 1, version = version + 1
-            WHERE id = ? AND version = ?
-          `).run(newTier, teamId, newDeadline, timestamp, inc.id, inc.version);
-
-          if (updated.changes === 0) return false;
-
-          db.prepare(`
-            INSERT INTO incident_events (incident_id, type, actor, from_value, to_value, message, at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-          `).run(inc.id, EventType.AUTO_ESCALATED, 'escalation-engine', inc.tier.toString(), newTier.toString(), `Auto-escalated to tier ${newTier} (${teamName})`, timestamp);
-
-          return { type: 'ESCALATION', incidentId: inc.id, newTier, teamName };
-        }
-
-        return false;
-      })();
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('[EscalationTicker] db error:', err);
+      } finally {
+        client.release();
+      }
 
       if (success) {
         if (success.type === 'BUSTER_CALL') {

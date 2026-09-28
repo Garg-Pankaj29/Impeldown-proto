@@ -1,12 +1,90 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { useAuthStore } from '../../lib/auth';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { api, Incident, Team } from '../../services/api';
 import { sse } from '../../services/sse';
 
-/* ── Helpers ─────────────────────────────────────────────────── */
-function timeAgo(dateStr: string) {
+/* ═══════════════════════════════════════════════════════════════
+   DESIGN TOKENS & CONSTANTS
+   ═══════════════════════════════════════════════════════════════ */
+const COLORS = {
+  navy: '#101A63',
+  purple: '#4B1FA8',
+  gold: '#B8863B',
+  parchment: '#F4E2C1',
+  cream: '#FFF8E8',
+  cardBg: '#FFFDF5',
+  critical: '#D71920',
+  high: '#F39C12',
+  medium: '#E8A317',
+  low: '#159A70',
+  success: '#159A70',
+  text: '#2C1810',
+  textMuted: '#6B5B4F',
+  border: '#D4B896',
+  borderLight: '#E8D5B8',
+};
+
+const PRIORITY_CONFIG: Record<number, { label: string; color: string; bg: string; border: string; icon: string }> = {
+  6: { label: 'Critical', color: '#fff', bg: '#D71920', border: '#B8151C', icon: '🚨' },
+  5: { label: 'Critical', color: '#fff', bg: '#D71920', border: '#B8151C', icon: '🚨' },
+  4: { label: 'High', color: '#fff', bg: '#F39C12', border: '#D68910', icon: '⚠️' },
+  3: { label: 'Medium', color: '#fff', bg: '#E8A317', border: '#C78F14', icon: '🔧' },
+  2: { label: 'Low', color: '#fff', bg: '#159A70', border: '#117A57', icon: '📋' },
+  1: { label: 'Low', color: '#fff', bg: '#159A70', border: '#117A57', icon: '📋' },
+};
+
+const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string }> = {
+  REPORTED: { label: 'Reported', color: '#3B82F6', bg: '#DBEAFE' },
+  ASSIGNED: { label: 'Assigned', color: '#F59E0B', bg: '#FEF3C7' },
+  IN_PROGRESS: { label: 'In Progress', color: '#8B5CF6', bg: '#EDE9FE' },
+  RESOLVED: { label: 'Resolved', color: '#10B981', bg: '#D1FAE5' },
+};
+
+const getPriority = (level: number) => PRIORITY_CONFIG[level] || PRIORITY_CONFIG[3];
+const getStatus = (status: string) => STATUS_CONFIG[status] || { label: status, color: '#666', bg: '#f0f0f0' };
+
+/* ═══════════════════════════════════════════════════════════════
+   HELPERS
+   ═══════════════════════════════════════════════════════════════ */
+function formatCountdown(totalSeconds: number): string {
+  if (totalSeconds <= 0) return 'OVERDUE';
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
+function formatSLADuration(totalSeconds: number): string {
+  const mins = Math.round(Math.abs(totalSeconds) / 60);
+  if (mins < 60) return `${mins} mins`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m > 0 ? `${h} hrs ${m} mins` : `${h} hrs`;
+}
+
+function slaProgress(incident: Incident): number {
+  if (incident.status === 'RESOLVED') return 100;
+  const deadline = new Date(incident.deadline_at).getTime();
+  const created = new Date(incident.created_at).getTime();
+  const total = deadline - created;
+  if (total <= 0) return 100;
+  const elapsed = Date.now() - created;
+  return Math.min(100, Math.max(0, (elapsed / total) * 100));
+}
+
+function formatDate(dateStr: string): string {
+  const d = new Date(dateStr);
+  return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+}
+
+function formatTime(dateStr: string): string {
+  const d = new Date(dateStr);
+  return d.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+}
+
+function timeAgo(dateStr: string): string {
   const diff = Date.now() - new Date(dateStr).getTime();
   const mins = Math.floor(diff / 60000);
   if (mins < 1) return 'Just now';
@@ -16,43 +94,366 @@ function timeAgo(dateStr: string) {
   return `${Math.floor(hrs / 24)}d ago`;
 }
 
-function formatCountdown(seconds: number) {
-  if (seconds <= 0) return 'OVERDUE';
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return `${m}:${String(s).padStart(2, '0')}`;
+/* ═══════════════════════════════════════════════════════════════
+   SLA COUNTDOWN HOOK
+   ═══════════════════════════════════════════════════════════════ */
+function useSLACountdown(remainingSecondsFromServer: number, isResolved: boolean) {
+  const [remaining, setRemaining] = useState(remainingSecondsFromServer);
+
+  useEffect(() => {
+    setRemaining(remainingSecondsFromServer);
+  }, [remainingSecondsFromServer]);
+
+  useEffect(() => {
+    if (isResolved) return;
+    const interval = setInterval(() => {
+      setRemaining(prev => prev - 1);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isResolved]);
+
+  return remaining;
 }
 
-const STATUS_DEFAULT = { label: 'Unknown', color: 'text-gray-300', bg: 'bg-gray-500/15', border: 'border-gray-500/40' };
-const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string; border: string }> = {
-  REPORTED:    { label: 'Reported',    color: 'text-sky-300',    bg: 'bg-sky-500/15',    border: 'border-sky-500/40' },
-  ASSIGNED:    { label: 'Assigned',    color: 'text-amber-300',  bg: 'bg-amber-500/15',  border: 'border-amber-500/40' },
-  IN_PROGRESS: { label: 'In Progress', color: 'text-orange-300', bg: 'bg-orange-500/15', border: 'border-orange-500/40' },
-  RESOLVED:    { label: 'Resolved',    color: 'text-emerald-300',bg: 'bg-emerald-500/15',border: 'border-emerald-500/40' },
-};
-const getStatus = (s: string) => STATUS_CONFIG[s] ?? STATUS_DEFAULT;
-
-const URGENCY_DEFAULT = { ring: '', glow: '' };
-const URGENCY_CONFIG: Record<string, { ring: string; glow: string }> = {
-  red:    { ring: 'ring-2 ring-rose-500/60', glow: 'shadow-[0_0_15px_rgba(225,29,72,0.3)]' },
-  yellow: { ring: 'ring-2 ring-amber-500/50', glow: 'shadow-[0_0_12px_rgba(245,197,66,0.2)]' },
-  green:  { ring: '', glow: '' },
-};
-const getUrgency = (u: string) => URGENCY_CONFIG[u] ?? URGENCY_DEFAULT;
-
-/* ── Marine Compass SVG ──────────────────────────────────────── */
-function MarineCompass({ className = 'w-5 h-5' }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="1.5">
-      <circle cx="12" cy="12" r="10" />
-      <polygon points="12,4 14,11 12,10 10,11" fill="currentColor" opacity="0.8" />
-      <polygon points="12,20 14,13 12,14 10,13" fill="currentColor" opacity="0.4" />
-      <circle cx="12" cy="12" r="1.5" fill="currentColor" />
+/* ═══════════════════════════════════════════════════════════════
+   SVG ICONS (inline, no external deps)
+   ═══════════════════════════════════════════════════════════════ */
+const Icons = {
+  location: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1 1 15 0Z" />
     </svg>
+  ),
+  calendar: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 0 1 2.25-2.25h13.5A2.25 2.25 0 0 1 21 7.5v11.25m-18 0A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75m-18 0v-7.5A2.25 2.25 0 0 1 5.25 9h13.5A2.25 2.25 0 0 1 21 11.25v7.5" />
+    </svg>
+  ),
+  clock: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <circle cx="12" cy="12" r="10" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6l4 2" />
+    </svg>
+  ),
+  chevronRight: (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path strokeLinecap="round" strokeLinejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
+    </svg>
+  ),
+  team: (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a9.094 9.094 0 0 0 3.741-.479 3 3 0 0 0-4.682-2.72m.94 3.198.001.031c0 .225-.012.447-.037.666A11.944 11.944 0 0 1 12 21c-2.17 0-4.207-.576-5.963-1.584A6.062 6.062 0 0 1 6 18.719m12 0a5.971 5.971 0 0 0-.941-3.197m0 0A5.995 5.995 0 0 0 12 12.75a5.995 5.995 0 0 0-5.058 2.772m0 0a3 3 0 0 0-4.681 2.72 8.986 8.986 0 0 0 3.74.477m.94-3.197a5.971 5.971 0 0 0-.94 3.197M15 6.75a3 3 0 1 1-6 0 3 3 0 0 1 6 0Zm6 3a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Zm-13.5 0a2.25 2.25 0 1 1-4.5 0 2.25 2.25 0 0 1 4.5 0Z" />
+    </svg>
+  ),
+  search: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
+    </svg>
+  ),
+  filter: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 3c2.755 0 5.455.232 8.083.678.533.09.917.556.917 1.096v1.044a2.25 2.25 0 0 1-.659 1.591l-5.432 5.432a2.25 2.25 0 0 0-.659 1.591v2.927a2.25 2.25 0 0 1-1.244 2.013L9.75 21v-6.568a2.25 2.25 0 0 0-.659-1.591L3.659 7.409A2.25 2.25 0 0 1 3 5.818V4.774c0-.54.384-1.006.917-1.096A48.32 48.32 0 0 1 12 3Z" />
+    </svg>
+  ),
+  warning: (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+    </svg>
+  ),
+  check: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+      <path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+    </svg>
+  ),
+  close: (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+    </svg>
+  ),
+  edit: (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path strokeLinecap="round" strokeLinejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125M18 14v4.75A2.25 2.25 0 0 1 15.75 21H5.25A2.25 2.25 0 0 1 3 18.75V8.25A2.25 2.25 0 0 1 5.25 6H10" />
+    </svg>
+  ),
+  logout: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0 0 13.5 3h-6a2.25 2.25 0 0 0-2.25 2.25v13.5A2.25 2.25 0 0 0 7.5 21h6a2.25 2.25 0 0 0 2.25-2.25V15m3 0 3-3m0 0-3-3m3 3H9" />
+    </svg>
+  ),
+  siren: (
+    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path strokeLinecap="round" strokeLinejoin="round" d="M14.857 17.082a23.848 23.848 0 0 0 5.454-1.31A8.967 8.967 0 0 1 18 9.75V9A6 6 0 0 0 6 9v.75a8.967 8.967 0 0 1-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 0 1-5.714 0m5.714 0a3 3 0 1 1-5.714 0" />
+    </svg>
+  ),
+};
+
+/* ═══════════════════════════════════════════════════════════════
+   SKELETON COMPONENTS
+   ═══════════════════════════════════════════════════════════════ */
+function SkeletonCard() {
+  return (
+    <div className="animate-pulse" style={{ background: COLORS.cardBg, borderRadius: 12, border: `1px solid ${COLORS.borderLight}`, padding: '20px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
+        <div style={{ height: 20, width: '60%', background: COLORS.borderLight, borderRadius: 4 }} />
+        <div style={{ height: 24, width: 60, background: COLORS.borderLight, borderRadius: 12 }} />
+      </div>
+      <div style={{ height: 14, width: '80%', background: COLORS.borderLight, borderRadius: 4, marginBottom: 8 }} />
+      <div style={{ display: 'flex', gap: 16, marginTop: 12 }}>
+        <div style={{ height: 12, width: 100, background: COLORS.borderLight, borderRadius: 4 }} />
+        <div style={{ height: 12, width: 120, background: COLORS.borderLight, borderRadius: 4 }} />
+      </div>
+    </div>
   );
 }
 
-/* ── Incident Detail Modal ───────────────────────────────────── */
+function SkeletonStat() {
+  return (
+    <div className="animate-pulse" style={{ background: COLORS.cardBg, borderRadius: 12, border: `1px solid ${COLORS.borderLight}`, padding: 16, textAlign: 'center' }}>
+      <div style={{ height: 32, width: 40, background: COLORS.borderLight, borderRadius: 4, margin: '0 auto 8px' }} />
+      <div style={{ height: 12, width: 60, background: COLORS.borderLight, borderRadius: 4, margin: '0 auto' }} />
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   SLA COUNTDOWN COMPONENT
+   ═══════════════════════════════════════════════════════════════ */
+function SLACountdownDisplay({ incident }: { incident: Incident }) {
+  const remaining = useSLACountdown(incident.remainingSeconds, incident.status === 'RESOLVED');
+  const progress = slaProgress(incident);
+  const isOverdue = remaining <= 0;
+  const deadline = new Date(incident.deadline_at).getTime();
+  const created = new Date(incident.created_at).getTime();
+  const totalDuration = deadline - created;
+
+  const progressColor = isOverdue ? COLORS.critical : progress > 70 ? '#F39C12' : progress > 50 ? '#E8A317' : COLORS.success;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4, minWidth: 130 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span style={{ color: isOverdue ? COLORS.critical : '#F39C12' }}>{Icons.clock}</span>
+        <span style={{
+          fontFamily: 'monospace',
+          fontSize: 18,
+          fontWeight: 700,
+          color: isOverdue ? COLORS.critical : '#C85000',
+          ...(isOverdue ? { animation: 'pulse 1.5s ease-in-out infinite' } : {}),
+        }}>
+          {formatCountdown(Math.max(0, remaining))}
+        </span>
+      </div>
+      <span style={{ fontSize: 11, color: COLORS.textMuted }}>
+        of {formatSLADuration(totalDuration / 1000)}
+      </span>
+      {/* Progress bar */}
+      <div style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{
+          flex: 1,
+          height: 6,
+          background: '#E8D5B8',
+          borderRadius: 3,
+          overflow: 'hidden',
+        }}>
+          <div style={{
+            width: `${Math.min(100, progress)}%`,
+            height: '100%',
+            background: progressColor,
+            borderRadius: 3,
+            transition: 'width 1s linear',
+          }} />
+        </div>
+        <span style={{ fontSize: 11, fontWeight: 600, color: COLORS.textMuted, minWidth: 32 }}>
+          {Math.round(progress)}%
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   INCIDENT CARD
+   ═══════════════════════════════════════════════════════════════ */
+function IncidentCard({
+  incident,
+  onOpenDetail,
+  onStatusChange,
+  isActioning,
+}: {
+  incident: Incident;
+  onOpenDetail: (inc: Incident) => void;
+  onStatusChange: (id: number, status: string) => void;
+  isActioning: boolean;
+}) {
+  const priority = getPriority(incident.level);
+  const status = getStatus(incident.status);
+
+  // Determine next valid status transitions
+  const getNextStatuses = (currentStatus: string): { value: string; label: string }[] => {
+    switch (currentStatus) {
+      case 'REPORTED': return [{ value: 'ASSIGNED', label: 'Assigned' }, { value: 'RESOLVED', label: 'Resolved' }];
+      case 'ASSIGNED': return [{ value: 'IN_PROGRESS', label: 'In Progress' }, { value: 'RESOLVED', label: 'Resolved' }];
+      case 'IN_PROGRESS': return [{ value: 'RESOLVED', label: 'Resolved' }];
+      default: return [];
+    }
+  };
+
+  const nextStatuses = getNextStatuses(incident.status);
+
+  return (
+    <div
+      style={{
+        background: COLORS.cardBg,
+        borderRadius: 14,
+        border: `1px solid ${COLORS.borderLight}`,
+        padding: '20px 24px',
+        cursor: 'pointer',
+        transition: 'all 0.2s ease',
+        boxShadow: '0 2px 8px rgba(139,100,60,0.08)',
+        position: 'relative',
+        overflow: 'hidden',
+      }}
+      className="incident-card"
+      onClick={() => onOpenDetail(incident)}
+      role="button"
+      tabIndex={0}
+      aria-label={`Incident: ${incident.title}`}
+      onKeyDown={e => { if (e.key === 'Enter') onOpenDetail(incident); }}
+    >
+      {/* Priority stripe */}
+      <div style={{
+        position: 'absolute', left: 0, top: 0, bottom: 0, width: 4,
+        background: priority.bg,
+      }} />
+
+      <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
+        {/* Left: Icon + Content */}
+        <div style={{
+          width: 44, height: 44, borderRadius: '50%',
+          background: `${priority.bg}18`,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          fontSize: 22, flexShrink: 0,
+        }}>
+          {priority.icon}
+        </div>
+
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6, flexWrap: 'wrap' }}>
+            <h3 style={{
+              fontFamily: '"Inter", sans-serif',
+              fontWeight: 700,
+              fontSize: 15,
+              color: COLORS.text,
+              margin: 0,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              maxWidth: 320,
+            }}>
+              {incident.title}
+            </h3>
+            <span style={{
+              padding: '2px 12px',
+              borderRadius: 12,
+              fontSize: 11,
+              fontWeight: 700,
+              color: priority.color,
+              background: priority.bg,
+              letterSpacing: 0.5,
+            }}>
+              {priority.label}
+            </span>
+          </div>
+
+          <p style={{
+            fontSize: 13,
+            color: COLORS.textMuted,
+            margin: '0 0 10px 0',
+            lineHeight: 1.4,
+            display: '-webkit-box',
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: 'vertical',
+            overflow: 'hidden',
+          }}>
+            {incident.description}
+          </p>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 16, fontSize: 12, color: COLORS.textMuted, flexWrap: 'wrap' }}>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              {Icons.location}
+              {incident.location}
+            </span>
+            <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              {Icons.calendar}
+              {formatDate(incident.created_at)} • {formatTime(incident.created_at)}
+            </span>
+          </div>
+        </div>
+
+        {/* Right: SLA + Status + Arrow */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 20, flexShrink: 0 }}>
+          {incident.status !== 'RESOLVED' && (
+            <SLACountdownDisplay incident={incident} />
+          )}
+
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
+            {incident.status !== 'RESOLVED' && nextStatuses.length > 0 ? (
+              <select
+                value={incident.status}
+                onChange={e => {
+                  e.stopPropagation();
+                  onStatusChange(incident.id, e.target.value);
+                }}
+                onClick={e => e.stopPropagation()}
+                disabled={isActioning}
+                style={{
+                  padding: '6px 28px 6px 12px',
+                  borderRadius: 8,
+                  border: `1px solid ${status.color}40`,
+                  background: status.bg,
+                  color: status.color,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  appearance: 'none',
+                  backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23666' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")`,
+                  backgroundRepeat: 'no-repeat',
+                  backgroundPosition: 'right 8px center',
+                  minWidth: 120,
+                }}
+                aria-label="Change incident status"
+              >
+                <option value={incident.status}>{status.label}</option>
+                {nextStatuses.map(s => (
+                  <option key={s.value} value={s.value}>{s.label}</option>
+                ))}
+              </select>
+            ) : (
+              <span style={{
+                padding: '6px 12px',
+                borderRadius: 8,
+                background: status.bg,
+                color: status.color,
+                fontSize: 12,
+                fontWeight: 600,
+              }}>
+                {status.label}
+              </span>
+            )}
+          </div>
+
+          <div style={{ color: COLORS.gold, opacity: 0.6 }}>
+            {Icons.chevronRight}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   INCIDENT DETAIL MODAL
+   ═══════════════════════════════════════════════════════════════ */
 function IncidentDetailModal({
   incident, teams, onClose, onAssign, onStatusChange, onResolve, isActioning,
 }: {
@@ -64,96 +465,134 @@ function IncidentDetailModal({
   onResolve: () => void;
   isActioning: boolean;
 }) {
-  const sc = getStatus(incident.status);
+  const priority = getPriority(incident.level);
+  const status = getStatus(incident.status);
+  const remaining = useSLACountdown(incident.remainingSeconds, incident.status === 'RESOLVED');
+  const isOverdue = remaining <= 0 && incident.status !== 'RESOLVED';
   const assignedTeam = teams.find(t => t.id === incident.team_id);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+    <div style={{ position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }} onClick={onClose}>
+      <div style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)' }} />
       <div
-        className="relative bg-[#1a2332] border border-gray-700/50 rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-y-auto"
+        style={{
+          position: 'relative',
+          background: COLORS.cream,
+          borderRadius: 16,
+          border: `2px solid ${COLORS.gold}`,
+          boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+          width: '100%',
+          maxWidth: 700,
+          maxHeight: '90vh',
+          overflowY: 'auto',
+        }}
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="sticky top-0 bg-[#1a2332]/95 backdrop-blur-md border-b border-gray-700/50 p-6 flex justify-between items-start z-10">
-          <div className="flex-1 mr-4">
-            <div className="flex items-center gap-3 mb-2">
-              <span className={`text-xs px-2.5 py-1 rounded-full font-bold border ${sc.bg} ${sc.color} ${sc.border}`}>
-                {sc.label}
-              </span>
+        <div style={{
+          position: 'sticky', top: 0, zIndex: 10,
+          background: `linear-gradient(135deg, ${COLORS.navy}, ${COLORS.purple})`,
+          padding: '20px 24px',
+          borderRadius: '14px 14px 0 0',
+          display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
+        }}>
+          <div style={{ flex: 1, marginRight: 16 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+              <span style={{
+                padding: '3px 10px', borderRadius: 8,
+                background: status.bg, color: status.color,
+                fontSize: 11, fontWeight: 700,
+              }}>{status.label}</span>
+              <span style={{
+                padding: '3px 10px', borderRadius: 8,
+                background: priority.bg, color: '#fff',
+                fontSize: 11, fontWeight: 700,
+              }}>{priority.label}</span>
               {incident.tier > 0 && (
-                <span className={`text-xs px-2.5 py-1 rounded-full font-bold ${
-                  incident.tier === 3 ? 'bg-amber-500/20 text-amber-300 border border-amber-500/50 animate-pulse' : 'bg-rose-500/20 text-rose-300 border border-rose-500/50'
-                }`}>
+                <span style={{
+                  padding: '3px 10px', borderRadius: 8,
+                  background: incident.tier === 3 ? '#F59E0B' : '#EF4444',
+                  color: '#fff', fontSize: 11, fontWeight: 700,
+                  ...(incident.tier === 3 ? { animation: 'pulse 1.5s infinite' } : {}),
+                }}>
                   {incident.tier === 3 ? '⚡ BUSTER CALL' : `Tier ${incident.tier}`}
                 </span>
               )}
             </div>
-            <h2 className="font-pirata text-2xl text-white tracking-wide">{incident.title}</h2>
-            <p className="text-gray-400 text-sm mt-1">#{incident.id} • Reported by {incident.reporter}</p>
+            <h2 style={{ fontFamily: '"Pirata One", cursive', fontSize: 24, color: '#fff', margin: 0 }}>
+              {incident.title}
+            </h2>
+            <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)', marginTop: 4 }}>
+              #{incident.id} • Reported by {incident.reporter}
+            </p>
           </div>
-          <button onClick={onClose} className="text-gray-500 hover:text-white transition-colors p-1">
-            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
+          <button
+            onClick={onClose}
+            style={{ background: 'rgba(255,255,255,0.1)', border: 'none', borderRadius: 8, padding: 6, cursor: 'pointer', color: '#fff' }}
+            aria-label="Close modal"
+          >{Icons.close}</button>
         </div>
 
         {/* Body */}
-        <div className="p-6 space-y-6">
+        <div style={{ padding: 24 }}>
           {/* Info Grid */}
-          <div className="grid grid-cols-2 gap-4">
-            <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700/30">
-              <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Category</p>
-              <p className="text-sm text-gray-200 font-medium">{incident.category}</p>
-            </div>
-            <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700/30">
-              <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Location</p>
-              <p className="text-sm text-gray-200 font-medium">{incident.location}</p>
-            </div>
-            <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700/30">
-              <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Severity Level</p>
-              <p className="text-sm text-gray-200 font-medium font-pirata text-lg">Level {incident.level}</p>
-            </div>
-            <div className="bg-gray-800/50 rounded-xl p-4 border border-gray-700/30">
-              <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Assigned Team</p>
-              <p className="text-sm text-gray-200 font-medium">{assignedTeam ? `${assignedTeam.emoji} ${assignedTeam.name}` : 'Unassigned'}</p>
-            </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 20 }}>
+            {[
+              { label: 'Category', value: incident.category },
+              { label: 'Location', value: incident.location },
+              { label: 'Severity Level', value: `Level ${incident.level}` },
+              { label: 'Assigned Team', value: assignedTeam ? `${assignedTeam.emoji} ${assignedTeam.name}` : 'Unassigned' },
+            ].map(item => (
+              <div key={item.label} style={{
+                background: COLORS.parchment,
+                borderRadius: 10,
+                padding: 14,
+                border: `1px solid ${COLORS.borderLight}`,
+              }}>
+                <p style={{ fontSize: 10, color: COLORS.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>{item.label}</p>
+                <p style={{ fontSize: 13, fontWeight: 600, color: COLORS.text }}>{item.value}</p>
+              </div>
+            ))}
           </div>
 
-          {/* SLA / Timer */}
+          {/* SLA */}
           {incident.status !== 'RESOLVED' && (
-            <div className={`rounded-xl p-4 border ${incident.isOverdue ? 'bg-rose-500/10 border-rose-500/40' : 'bg-sky-500/10 border-sky-500/30'}`}>
-              <div className="flex items-center justify-between">
-                <p className={`text-xs uppercase tracking-wider font-semibold ${incident.isOverdue ? 'text-rose-400' : 'text-sky-400'}`}>
-                  SLA Countdown
-                </p>
-                <span className={`font-mono text-xl font-bold ${incident.isOverdue ? 'text-rose-400 animate-pulse' : 'text-sky-300'}`}>
-                  {incident.isOverdue ? `OVERDUE by ${Math.abs(incident.remainingSeconds)}s` : formatCountdown(incident.remainingSeconds)}
-                </span>
-              </div>
+            <div style={{
+              borderRadius: 10, padding: 14, marginBottom: 20,
+              background: isOverdue ? '#FEE2E2' : '#DBEAFE',
+              border: `1px solid ${isOverdue ? '#FCA5A5' : '#93C5FD'}`,
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            }}>
+              <p style={{ fontSize: 11, fontWeight: 700, textTransform: 'uppercase', color: isOverdue ? COLORS.critical : '#2563EB' }}>SLA Countdown</p>
+              <span style={{
+                fontFamily: 'monospace', fontSize: 22, fontWeight: 700,
+                color: isOverdue ? COLORS.critical : '#2563EB',
+                ...(isOverdue ? { animation: 'pulse 1.5s infinite' } : {}),
+              }}>
+                {isOverdue ? `OVERDUE by ${formatSLADuration(Math.abs(remaining))}` : formatCountdown(remaining)}
+              </span>
             </div>
           )}
 
           {/* Description */}
           {incident.description && (
-            <div className="bg-gray-800/30 rounded-xl p-4 border border-gray-700/20">
-              <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Description</p>
-              <p className="text-sm text-gray-300 leading-relaxed whitespace-pre-wrap">{incident.description}</p>
+            <div style={{ background: COLORS.parchment, borderRadius: 10, padding: 14, marginBottom: 20, border: `1px solid ${COLORS.borderLight}` }}>
+              <p style={{ fontSize: 10, color: COLORS.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>Description</p>
+              <p style={{ fontSize: 13, color: COLORS.text, lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{incident.description}</p>
             </div>
           )}
 
           {/* Timeline */}
           {incident.events && incident.events.length > 0 && (
-            <div className="bg-gray-800/30 rounded-xl p-4 border border-gray-700/20">
-              <p className="text-xs text-gray-500 uppercase tracking-wider mb-3">Activity Timeline</p>
-              <div className="space-y-3">
+            <div style={{ background: COLORS.parchment, borderRadius: 10, padding: 14, marginBottom: 20, border: `1px solid ${COLORS.borderLight}` }}>
+              <p style={{ fontSize: 10, color: COLORS.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 12 }}>Activity Timeline</p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 {incident.events.map((ev, i) => (
-                  <div key={ev.id || i} className="flex items-start gap-3">
-                    <div className="w-2 h-2 rounded-full bg-sky-500 mt-1.5 flex-shrink-0" />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm text-gray-300">{ev.message}</p>
-                      <p className="text-xs text-gray-500 mt-0.5">{new Date(ev.at).toLocaleString()}</p>
+                  <div key={ev.id || i} style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                    <div style={{ width: 8, height: 8, borderRadius: '50%', background: COLORS.purple, marginTop: 5, flexShrink: 0 }} />
+                    <div>
+                      <p style={{ fontSize: 13, color: COLORS.text }}>{ev.message}</p>
+                      <p style={{ fontSize: 11, color: COLORS.textMuted, marginTop: 2 }}>{new Date(ev.at).toLocaleString()}</p>
                     </div>
                   </div>
                 ))}
@@ -161,74 +600,49 @@ function IncidentDetailModal({
             </div>
           )}
 
-          {/* Attachments */}
-          {incident.attachments && incident.attachments.length > 0 && (
-            <div className="bg-gray-800/30 rounded-xl p-4 border border-gray-700/20">
-              <p className="text-xs text-gray-500 uppercase tracking-wider mb-3">Attachments</p>
-              <div className="grid grid-cols-3 gap-3">
-                {incident.attachments.map((att) => (
-                  <a key={att.id} href={att.url} target="_blank" rel="noopener noreferrer"
-                    className="rounded-lg overflow-hidden border border-gray-700/30 hover:border-sky-500/50 transition-colors">
-                    <img src={att.url} alt={att.filename} className="w-full h-24 object-cover" />
-                  </a>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Actions */}
+          {/* Quick Actions */}
           {incident.status !== 'RESOLVED' && (
-            <div className="border-t border-gray-700/30 pt-5 space-y-4">
-              <p className="text-xs text-gray-500 uppercase tracking-wider font-semibold">Quick Actions</p>
-              <div className="flex flex-wrap gap-3">
-                {/* Assign */}
+            <div style={{ borderTop: `1px solid ${COLORS.borderLight}`, paddingTop: 16 }}>
+              <p style={{ fontSize: 10, color: COLORS.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10, fontWeight: 700 }}>Quick Actions</p>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
                 {!incident.team_id && (
-                  <div className="flex items-center gap-2">
-                    <select
-                      id="assign-team-select"
-                      className="bg-gray-800 border border-gray-600 text-gray-200 rounded-lg px-3 py-2 text-sm focus:border-sky-500 focus:outline-none"
-                      defaultValue=""
-                      onChange={e => {
-                        const v = parseInt(e.target.value, 10);
-                        if (v) onAssign(v);
-                      }}
-                      disabled={isActioning}
-                    >
-                      <option value="" disabled>Assign Team...</option>
-                      {teams.map(t => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
-                    </select>
-                  </div>
+                  <select
+                    defaultValue=""
+                    onChange={e => { const v = parseInt(e.target.value, 10); if (v) onAssign(v); }}
+                    disabled={isActioning}
+                    style={{
+                      padding: '8px 12px', borderRadius: 8,
+                      border: `1px solid ${COLORS.border}`,
+                      background: COLORS.cardBg,
+                      fontSize: 13, color: COLORS.text, cursor: 'pointer',
+                    }}
+                    aria-label="Assign to team"
+                  >
+                    <option value="" disabled>Assign Team...</option>
+                    {teams.map(t => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                  </select>
                 )}
-
-                {/* Status transitions */}
-                {incident.status === 'ASSIGNED' && (
+                {(incident.status === 'ASSIGNED' || (incident.status === 'REPORTED' && incident.team_id)) && (
                   <button
                     onClick={() => onStatusChange('IN_PROGRESS')}
                     disabled={isActioning}
-                    className="bg-orange-600/20 hover:bg-orange-600/30 text-orange-300 border border-orange-500/40 rounded-lg px-4 py-2 text-sm font-bold transition-colors disabled:opacity-50"
-                  >
-                    ▶ Start Working
-                  </button>
+                    style={{
+                      padding: '8px 16px', borderRadius: 8,
+                      background: '#F59E0B20', border: '1px solid #F59E0B60',
+                      color: '#B45309', fontSize: 13, fontWeight: 700, cursor: 'pointer',
+                    }}
+                  >▶ Start Working</button>
                 )}
-
                 {(incident.status === 'ASSIGNED' || incident.status === 'IN_PROGRESS') && (
                   <button
                     onClick={onResolve}
                     disabled={isActioning}
-                    className="bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 rounded-lg px-4 py-2 text-sm font-bold transition-colors disabled:opacity-50"
-                  >
-                    ✓ Resolve
-                  </button>
-                )}
-
-                {incident.status === 'REPORTED' && incident.team_id && (
-                  <button
-                    onClick={() => onStatusChange('IN_PROGRESS')}
-                    disabled={isActioning}
-                    className="bg-orange-600/20 hover:bg-orange-600/30 text-orange-300 border border-orange-500/40 rounded-lg px-4 py-2 text-sm font-bold transition-colors disabled:opacity-50"
-                  >
-                    ▶ Start Working
-                  </button>
+                    style={{
+                      padding: '8px 16px', borderRadius: 8,
+                      background: '#10B98120', border: '1px solid #10B98160',
+                      color: '#047857', fontSize: 13, fontWeight: 700, cursor: 'pointer',
+                    }}
+                  >✓ Resolve</button>
                 )}
               </div>
             </div>
@@ -240,7 +654,7 @@ function IncidentDetailModal({
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   RESPONSE TEAM DASHBOARD
+   MAIN DASHBOARD
    ═══════════════════════════════════════════════════════════════ */
 export default function ResponseTeamDashboard() {
   const user = useAuthStore(s => s.user);
@@ -248,7 +662,10 @@ export default function ResponseTeamDashboard() {
   const navigate = useNavigate();
   const qc = useQueryClient();
 
-  const [view, setView] = useState<'active' | 'escalated' | 'resolved'>('active');
+  const [sortBy, setSortBy] = useState<string>('priority');
+  const [filterPriority, setFilterPriority] = useState('');
+  const [filterStatus, setFilterStatus] = useState('');
+  const [filterLocation, setFilterLocation] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedIncident, setSelectedIncident] = useState<Incident | null>(null);
 
@@ -260,6 +677,7 @@ export default function ResponseTeamDashboard() {
     const refresh = () => {
       qc.invalidateQueries({ queryKey: ['rt-incidents'] });
       qc.invalidateQueries({ queryKey: ['rt-stats'] });
+      qc.invalidateQueries({ queryKey: ['rt-resolved'] });
     };
     sse.on('incident.created', refresh);
     sse.on('incident.updated', refresh);
@@ -276,10 +694,16 @@ export default function ResponseTeamDashboard() {
   }, [qc]);
 
   /* ── Data fetching ───────────────────────────────────────── */
-  const { data: incidents, isLoading } = useQuery({
-    queryKey: ['rt-incidents', view, searchQuery],
-    queryFn: () => api.getIncidents(view, searchQuery ? { q: searchQuery } : undefined),
+  const { data: incidents, isLoading: isIncidentsLoading } = useQuery({
+    queryKey: ['rt-incidents', searchQuery],
+    queryFn: () => api.getIncidents('active', searchQuery ? { q: searchQuery } : undefined),
     refetchInterval: 15000,
+  });
+
+  const { data: resolvedIncidents, isLoading: isResolvedLoading } = useQuery({
+    queryKey: ['rt-resolved'],
+    queryFn: () => api.getIncidents('resolved'),
+    refetchInterval: 30000,
   });
 
   const { data: stats } = useQuery({
@@ -293,12 +717,95 @@ export default function ResponseTeamDashboard() {
     queryFn: api.getTeams,
   });
 
+  const { data: meta } = useQuery({
+    queryKey: ['meta'],
+    queryFn: api.getMeta,
+  });
+
+  /* ── Filter & Sort incidents ─────────────────────────────── */
+  const filteredIncidents = useMemo(() => {
+    if (!incidents) return [];
+    let result = [...incidents];
+
+    if (filterPriority) {
+      const levelRanges: Record<string, number[]> = {
+        critical: [5, 6],
+        high: [4],
+        medium: [3],
+        low: [1, 2],
+      };
+      const levels = levelRanges[filterPriority] || [];
+      result = result.filter(i => levels.includes(i.level));
+    }
+
+    if (filterStatus) {
+      result = result.filter(i => i.status === filterStatus);
+    }
+
+    if (filterLocation) {
+      result = result.filter(i => i.location === filterLocation);
+    }
+
+    // Sort
+    switch (sortBy) {
+      case 'priority':
+        result.sort((a, b) => b.level - a.level);
+        break;
+      case 'sla':
+        result.sort((a, b) => a.remainingSeconds - b.remainingSeconds);
+        break;
+      case 'created':
+        result.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        break;
+      case 'status':
+        const statusOrder: Record<string, number> = { REPORTED: 0, ASSIGNED: 1, IN_PROGRESS: 2, RESOLVED: 3 };
+        result.sort((a, b) => (statusOrder[a.status] ?? 9) - (statusOrder[b.status] ?? 9));
+        break;
+    }
+
+    return result;
+  }, [incidents, filterPriority, filterStatus, filterLocation, sortBy]);
+
+  // Get unique locations from actual incident data
+  const locations = useMemo(() => {
+    if (!incidents) return [];
+    return [...new Set(incidents.map(i => i.location))].sort();
+  }, [incidents]);
+
+  // Escalation watch: incidents nearing SLA breach
+  const escalationIncidents = useMemo(() => {
+    if (!incidents) return [];
+    return incidents
+      .filter(i => i.status !== 'RESOLVED' && (i.urgency === 'red' || i.isOverdue || i.tier > 0))
+      .sort((a, b) => a.remainingSeconds - b.remainingSeconds);
+  }, [incidents]);
+
+  // Recently resolved
+  const recentlyResolved = useMemo(() => {
+    if (!resolvedIncidents) return [];
+    return resolvedIncidents
+      .slice(0, 5)
+      .sort((a, b) => new Date(b.resolved_at!).getTime() - new Date(a.resolved_at!).getTime());
+  }, [resolvedIncidents]);
+
+  /* ── Computed stats ──────────────────────────────────────── */
+  const urgentCount = incidents?.filter(i => i.level >= 5 && i.status !== 'RESOLVED').length ?? 0;
+  const inProgressCount = incidents?.filter(i => i.status === 'IN_PROGRESS').length ?? 0;
+  const awaitingCount = incidents?.filter(i => i.status === 'REPORTED' || i.status === 'ASSIGNED').length ?? 0;
+  const resolvedTodayCount = useMemo(() => {
+    if (!resolvedIncidents) return 0;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return resolvedIncidents.filter(i => i.resolved_at && new Date(i.resolved_at).getTime() >= today.getTime()).length;
+  }, [resolvedIncidents]);
+
   /* ── Mutations ───────────────────────────────────────────── */
   const assignMutation = useMutation({
     mutationFn: ({ id, teamId }: { id: number; teamId: number }) => api.assignIncident(id, teamId),
     onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: ['rt-incidents'] });
       qc.invalidateQueries({ queryKey: ['rt-stats'] });
+      qc.invalidateQueries({ queryKey: ['rt-resolved'] });
       setSelectedIncident(data);
     },
   });
@@ -308,6 +815,7 @@ export default function ResponseTeamDashboard() {
     onSuccess: (data) => {
       qc.invalidateQueries({ queryKey: ['rt-incidents'] });
       qc.invalidateQueries({ queryKey: ['rt-stats'] });
+      qc.invalidateQueries({ queryKey: ['rt-resolved'] });
       if (data.status === 'RESOLVED') setSelectedIncident(null);
       else setSelectedIncident(data);
     },
@@ -319,12 +827,14 @@ export default function ResponseTeamDashboard() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['rt-incidents'] });
       qc.invalidateQueries({ queryKey: ['rt-stats'] });
+      qc.invalidateQueries({ queryKey: ['rt-resolved'] });
       setSelectedIncident(null);
     },
     onError: (err: any) => alert(err.message),
   });
 
-  /* ── Open detail (fetch full) ────────────────────────────── */
+  const isActioning = assignMutation.isPending || statusMutation.isPending || resolveMutation.isPending;
+
   const openDetail = async (inc: Incident) => {
     try {
       const full = await api.getIncident(inc.id);
@@ -334,251 +844,640 @@ export default function ResponseTeamDashboard() {
     }
   };
 
-  /* ── Computed stats ──────────────────────────────────────── */
-  const totalActive = (stats?.counts?.REPORTED || 0) + (stats?.counts?.ASSIGNED || 0) + (stats?.counts?.IN_PROGRESS || 0);
-  const totalResolved = stats?.counts?.RESOLVED || 0;
-  const totalEscalated = stats?.escalatedCount || 0;
-  const totalOverdue = stats?.overdueCount || 0;
+  const handleStatusChange = useCallback((id: number, status: string) => {
+    if (status === 'RESOLVED') {
+      resolveMutation.mutate(id);
+    } else {
+      statusMutation.mutate({ id, status });
+    }
+  }, [statusMutation, resolveMutation]);
 
-  const isActioning = assignMutation.isPending || statusMutation.isPending || resolveMutation.isPending;
+  const clearFilters = () => {
+    setFilterPriority('');
+    setFilterStatus('');
+    setFilterLocation('');
+    setSearchQuery('');
+  };
 
-  const viewTabs = [
-    { key: 'active' as const, label: 'Active', count: totalActive, icon: '⚔️' },
-    { key: 'escalated' as const, label: 'Escalated', count: totalEscalated, icon: '🔥' },
-    { key: 'resolved' as const, label: 'Resolved', count: totalResolved, icon: '✅' },
-  ];
+  const hasFilters = filterPriority || filterStatus || filterLocation || searchQuery;
+
+  // Get the user's team (first team found for now — the system doesn't have team_members table)
+  const myTeam = teams?.[0];
 
   return (
-    <div className="min-h-screen bg-[#0f1923] text-gray-200 font-sans flex flex-col">
-      {/* ── Header ─────────────────────────────────────────── */}
-      <header className="bg-[#152238]/90 backdrop-blur-md border-b border-sky-900/30 px-6 py-4 flex justify-between items-center shadow-lg relative overflow-hidden">
-        <div className="absolute inset-0 bg-gradient-to-r from-sky-950/30 via-transparent to-transparent pointer-events-none" />
-        <div className="relative flex items-center gap-4">
-          <div className="relative">
-            <img src="/images/logo.png" alt="Logo" className="h-11 w-11 object-contain" />
-            <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-emerald-500 border-2 border-[#152238] shadow-[0_0_6px_#22c55e]" />
-          </div>
-          <div>
-            <h1 className="font-pirata text-2xl text-sky-100 tracking-wider leading-none">IMPEL DOWN</h1>
-            <span className="text-[10px] font-bold text-sky-400/80 uppercase tracking-[0.3em]">Response Command</span>
-          </div>
+    <div style={{ minHeight: '100vh', background: COLORS.parchment, fontFamily: '"Inter", sans-serif' }}>
+      {/* ═══════════════════════════════════════════════════════
+         CSS ANIMATIONS
+         ═══════════════════════════════════════════════════════ */}
+      <style>{`
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .incident-card:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(139,100,60,0.15) !important; border-color: ${COLORS.gold} !important; }
+        .parchment-bg { background-image: url("data:image/svg+xml,%3Csvg width='200' height='200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E"); }
+        .select-styled { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236B5B4F' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 10px center; padding-right: 30px; }
+        .select-styled:focus { outline: none; border-color: ${COLORS.purple}; box-shadow: 0 0 0 2px ${COLORS.purple}20; }
+        @media (max-width: 1024px) { .dashboard-grid { grid-template-columns: 1fr !important; } }
+      `}</style>
+
+      {/* ═══════════════════════════════════════════════════════
+         HERO HEADER
+         ═══════════════════════════════════════════════════════ */}
+      <header className="parchment-bg" style={{
+        backgroundImage: `url(/images/reporter_map_bg.png)`,
+        backgroundSize: 'cover',
+        backgroundPosition: 'center',
+        borderBottom: `3px solid ${COLORS.gold}`,
+        position: 'relative',
+        overflow: 'hidden',
+        minHeight: 200,
+      }}>
+        {/* Compass decoration */}
+        <div style={{
+          position: 'absolute', right: '15%', top: '50%', transform: 'translateY(-50%)',
+          width: 300, height: 300, borderRadius: '50%',
+          border: `2px solid ${COLORS.gold}30`,
+          opacity: 0.15,
+        }}>
+          <div style={{ position: 'absolute', inset: 20, borderRadius: '50%', border: `1px solid ${COLORS.gold}40` }} />
+          <div style={{ position: 'absolute', left: '50%', top: 0, bottom: 0, width: 1, background: `${COLORS.gold}30` }} />
+          <div style={{ position: 'absolute', top: '50%', left: 0, right: 0, height: 1, background: `${COLORS.gold}30` }} />
         </div>
-        <div className="relative flex items-center gap-5">
-          {/* Search */}
-          <div className="relative hidden md:block">
-            <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-              <path strokeLinecap="round" strokeLinejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" />
-            </svg>
-            <input
-              type="text"
-              placeholder="Search incidents..."
-              value={searchQuery}
-              onChange={e => setSearchQuery(e.target.value)}
-              className="bg-gray-800/60 border border-gray-700/40 rounded-lg pl-9 pr-4 py-2 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-sky-500/50 w-64 transition-colors"
-            />
+
+        <div style={{ maxWidth: 1400, margin: '0 auto', padding: '20px 30px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', position: 'relative', zIndex: 2 }}>
+          <div>
+            {/* Branding */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 16 }}>
+              <img src="/images/logo.png" alt="ImpelOps Logo" style={{ height: 56, width: 56, objectFit: 'contain' }} />
+              <div>
+                <h1 style={{ fontFamily: '"Pirata One", cursive', fontSize: 32, color: COLORS.navy, margin: 0, letterSpacing: 2 }}>IMPEL DOWN</h1>
+                <span style={{ fontSize: 11, fontWeight: 700, color: COLORS.purple, textTransform: 'uppercase', letterSpacing: 4 }}>INCIDENT COMMAND</span>
+              </div>
+            </div>
+
+            {/* Greeting */}
+            <div style={{ marginBottom: 8 }}>
+              <h2 style={{ fontFamily: '"Pirata One", cursive', fontSize: 36, color: COLORS.text, margin: 0 }}>
+                Ahoy, <span style={{ color: COLORS.purple }}>{user?.name || 'Response Team'}!</span>
+              </h2>
+              <p style={{ fontSize: 15, color: COLORS.textMuted, marginTop: 4, fontStyle: 'italic' }}>
+                Handle assigned incidents, track deadlines, and keep operations moving.
+              </p>
+            </div>
           </div>
-          {/* User */}
-          <div className="flex items-center gap-3 pl-4 border-l border-gray-700/40">
-            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-sky-600 to-indigo-700 flex items-center justify-center text-sm font-bold text-white shadow-md">
-              {user?.name?.charAt(0) || 'R'}
-            </div>
-            <div className="hidden sm:block">
-              <p className="text-sm text-gray-200 font-medium leading-none">{user?.name || 'Responder'}</p>
-              <p className="text-[10px] text-sky-400/70 uppercase tracking-wider mt-0.5">Response Team</p>
-            </div>
+
+          {/* Logout */}
+          <div style={{ display: 'flex', alignItems: 'flex-start' }}>
             <button
               onClick={handleLogout}
-              className="ml-2 text-gray-500 hover:text-rose-400 transition-colors p-1"
-              title="Logout"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                padding: '8px 14px', borderRadius: 8,
+                background: `${COLORS.navy}10`, border: `1px solid ${COLORS.navy}30`,
+                color: COLORS.navy, fontSize: 13, fontWeight: 600, cursor: 'pointer',
+              }}
+              aria-label="Logout"
             >
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0 0 13.5 3h-6a2.25 2.25 0 0 0-2.25 2.25v13.5A2.25 2.25 0 0 0 7.5 21h6a2.25 2.25 0 0 0 2.25-2.25V15m3 0 3-3m0 0-3-3m3 3H9" />
-              </svg>
+              {Icons.logout}
+              Logout
             </button>
           </div>
         </div>
       </header>
 
-      {/* ── Main Content ───────────────────────────────────── */}
-      <main className="flex-1 flex flex-col p-6 max-w-[1400px] mx-auto w-full gap-6">
-        {/* ── Stat Cards ─────────────────────────────────────── */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          {[
-            { label: 'Active Incidents', value: totalActive, color: 'from-sky-600/20 to-sky-700/10', border: 'border-sky-500/30', text: 'text-sky-300', icon: '⚡' },
-            { label: 'In Progress', value: stats?.counts?.IN_PROGRESS || 0, color: 'from-orange-600/20 to-orange-700/10', border: 'border-orange-500/30', text: 'text-orange-300', icon: '🔧' },
-            { label: 'Escalated', value: totalEscalated, color: 'from-rose-600/20 to-rose-700/10', border: 'border-rose-500/30', text: 'text-rose-300', icon: '🔥' },
-            { label: 'Overdue', value: totalOverdue, color: 'from-red-600/20 to-red-700/10', border: 'border-red-500/30', text: 'text-red-300', icon: '⏰' },
-          ].map((stat) => (
-            <div key={stat.label} className={`bg-gradient-to-br ${stat.color} border ${stat.border} rounded-xl p-4 relative overflow-hidden`}>
-              <div className="absolute top-2 right-3 text-2xl opacity-40">{stat.icon}</div>
-              <p className="text-xs text-gray-400 uppercase tracking-wider font-semibold mb-1">{stat.label}</p>
-              <p className={`font-pirata text-4xl ${stat.text}`}>{stat.value}</p>
-            </div>
-          ))}
-        </div>
+      {/* ═══════════════════════════════════════════════════════
+         MAIN CONTENT
+         ═══════════════════════════════════════════════════════ */}
+      <main style={{ maxWidth: 1400, margin: '0 auto', padding: '24px 30px' }}>
+        <div className="dashboard-grid" style={{ display: 'grid', gridTemplateColumns: '1fr 380px', gap: 24 }}>
 
-        {/* ── Tabs ────────────────────────────────────────────── */}
-        <div className="flex items-center gap-1 bg-[#152238]/60 rounded-xl p-1.5 border border-gray-700/30 w-fit">
-          {viewTabs.map(tab => (
-            <button
-              key={tab.key}
-              onClick={() => setView(tab.key)}
-              className={`px-5 py-2.5 rounded-lg text-sm font-bold transition-all flex items-center gap-2 ${
-                view === tab.key
-                  ? 'bg-sky-600/20 text-sky-200 border border-sky-500/40 shadow-md'
-                  : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/40 border border-transparent'
-              }`}
-            >
-              <span className="text-base">{tab.icon}</span>
-              {tab.label}
-              <span className={`text-xs px-1.5 py-0.5 rounded-full ${
-                view === tab.key ? 'bg-sky-500/30 text-sky-200' : 'bg-gray-700/50 text-gray-500'
-              }`}>
-                {tab.count}
-              </span>
-            </button>
-          ))}
-        </div>
+          {/* ═══════════════════════════════════════════════════
+             LEFT COLUMN
+             ═══════════════════════════════════════════════════ */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
 
-        {/* ── Incident List ──────────────────────────────────── */}
-        <div className="flex-1 overflow-auto">
-          {isLoading && (
-            <div className="flex items-center justify-center py-20">
-              <div className="flex flex-col items-center gap-3 animate-pulse">
-                <MarineCompass className="w-10 h-10 text-sky-500 animate-spin" />
-                <p className="text-gray-500 text-sm font-medium">Loading incidents...</p>
+            {/* ── My Assigned Incidents ────────────────────────── */}
+            <section style={{
+              background: COLORS.cardBg,
+              borderRadius: 16,
+              border: `1px solid ${COLORS.border}`,
+              boxShadow: '0 4px 16px rgba(139,100,60,0.08)',
+              overflow: 'hidden',
+            }}>
+              {/* Section Header */}
+              <div style={{
+                padding: '18px 24px',
+                borderBottom: `1px solid ${COLORS.borderLight}`,
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                background: `${COLORS.parchment}80`,
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <span style={{ fontSize: 24 }}>⚔️</span>
+                  <div>
+                    <h2 style={{ fontFamily: '"Pirata One", cursive', fontSize: 22, color: COLORS.navy, margin: 0 }}>
+                      My Assigned Incidents
+                    </h2>
+                    <p style={{ fontSize: 12, color: COLORS.textMuted, margin: 0 }}>
+                      Incidents assigned to your team. Take action and update the status.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Sort */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <label htmlFor="sort-select" style={{ fontSize: 12, color: COLORS.textMuted, fontWeight: 600 }}>Sort by:</label>
+                  <select
+                    id="sort-select"
+                    value={sortBy}
+                    onChange={e => setSortBy(e.target.value)}
+                    className="select-styled"
+                    style={{
+                      padding: '6px 12px',
+                      borderRadius: 8,
+                      border: `1px solid ${COLORS.border}`,
+                      background: COLORS.cream,
+                      fontSize: 12,
+                      color: COLORS.text,
+                      fontWeight: 500,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <option value="priority">Priority (High to Low)</option>
+                    <option value="sla">SLA Remaining</option>
+                    <option value="created">Created Time</option>
+                    <option value="status">Status</option>
+                  </select>
+                </div>
               </div>
-            </div>
-          )}
 
-          {!isLoading && incidents?.length === 0 && (
-            <div className="flex flex-col items-center justify-center py-20 text-gray-500">
-              <svg className="w-16 h-16 opacity-30 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75 11.25 15 15 9.75m-3-7.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285Z" />
-              </svg>
-              <p className="font-pirata text-2xl text-gray-400 mb-1">All Clear, Commander</p>
-              <p className="text-sm">No incidents found in this view.</p>
-            </div>
-          )}
+              {/* Incident List */}
+              <div style={{ padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+                {isIncidentsLoading && (
+                  <>
+                    <SkeletonCard />
+                    <SkeletonCard />
+                    <SkeletonCard />
+                  </>
+                )}
 
-          {incidents && incidents.length > 0 && (
-            <div className="grid gap-3">
-              {incidents.map(inc => {
-                const sc = getStatus(inc.status);
-                const uc = getUrgency(inc.urgency);
-                const team = teams?.find(t => t.id === inc.team_id);
+                {!isIncidentsLoading && filteredIncidents.length === 0 && (
+                  <div style={{ textAlign: 'center', padding: '40px 20px' }}>
+                    <span style={{ fontSize: 48, opacity: 0.3, display: 'block', marginBottom: 12 }}>🛡️</span>
+                    <p style={{ fontFamily: '"Pirata One", cursive', fontSize: 22, color: COLORS.textMuted, marginBottom: 4 }}>
+                      {hasFilters ? 'No Incidents Match Your Filters' : 'All Clear, Commander'}
+                    </p>
+                    <p style={{ fontSize: 13, color: COLORS.textMuted }}>
+                      {hasFilters ? 'Try adjusting your filters or clearing them.' : 'No incidents are currently assigned to your team.'}
+                    </p>
+                    {hasFilters && (
+                      <button
+                        onClick={clearFilters}
+                        style={{
+                          marginTop: 12, padding: '8px 20px', borderRadius: 8,
+                          background: COLORS.purple, border: 'none',
+                          color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                        }}
+                      >Clear Filters</button>
+                    )}
+                  </div>
+                )}
 
-                return (
+                {filteredIncidents.map(inc => (
+                  <IncidentCard
+                    key={inc.id}
+                    incident={inc}
+                    onOpenDetail={openDetail}
+                    onStatusChange={handleStatusChange}
+                    isActioning={isActioning}
+                  />
+                ))}
+              </div>
+            </section>
+
+            {/* ── Recently Resolved ────────────────────────────── */}
+            <section style={{
+              background: COLORS.cardBg,
+              borderRadius: 16,
+              border: `1px solid ${COLORS.border}`,
+              boxShadow: '0 4px 16px rgba(139,100,60,0.08)',
+              overflow: 'hidden',
+            }}>
+              <div style={{
+                padding: '16px 24px',
+                borderBottom: `1px solid ${COLORS.borderLight}`,
+                display: 'flex', alignItems: 'center', gap: 10,
+                background: `${COLORS.parchment}80`,
+              }}>
+                <span style={{ fontSize: 22 }}>✅</span>
+                <h2 style={{ fontFamily: '"Pirata One", cursive', fontSize: 20, color: COLORS.navy, margin: 0 }}>
+                  Recently Resolved
+                </h2>
+              </div>
+
+              <div style={{ padding: '12px 20px' }}>
+                {isResolvedLoading && <SkeletonCard />}
+
+                {!isResolvedLoading && recentlyResolved.length === 0 && (
+                  <p style={{ textAlign: 'center', padding: '20px', fontSize: 13, color: COLORS.textMuted }}>
+                    No incidents have been resolved recently.
+                  </p>
+                )}
+
+                {recentlyResolved.map(inc => (
                   <div
                     key={inc.id}
+                    style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                      padding: '12px 0',
+                      borderBottom: `1px solid ${COLORS.borderLight}`,
+                      cursor: 'pointer',
+                    }}
                     onClick={() => openDetail(inc)}
-                    className={`bg-[#1a2332]/80 border border-gray-700/30 rounded-xl p-5 cursor-pointer
-                      hover:bg-[#1e2a3d]/90 hover:border-gray-600/40 transition-all group
-                      ${uc.ring} ${uc.glow}
-                      ${inc.tier === 3 ? 'animate-pulse border-amber-500/50' : ''}
-                    `}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={e => { if (e.key === 'Enter') openDetail(inc); }}
                   >
-                    <div className="flex items-start justify-between gap-4">
-                      {/* Left */}
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-3 mb-2">
-                          <span className="font-pirata text-lg text-amber-400/80">Lv.{inc.level}</span>
-                          <h3 className="font-bold text-base text-gray-100 truncate group-hover:text-white transition-colors">
-                            {inc.title}
-                          </h3>
-                          {inc.tier === 3 && (
-                            <span className="flex-shrink-0 bg-amber-500/20 text-amber-300 text-[10px] px-2 py-0.5 rounded-full font-bold border border-amber-500/40 animate-pulse">
-                              BUSTER CALL
-                            </span>
-                          )}
-                          {inc.tier > 0 && inc.tier < 3 && (
-                            <span className="flex-shrink-0 bg-rose-500/15 text-rose-300 text-[10px] px-2 py-0.5 rounded-full font-bold border border-rose-500/30">
-                              ESC T{inc.tier}
-                            </span>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-4 text-xs text-gray-400">
-                          <span className="flex items-center gap-1">
-                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M15 10.5a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1 1 15 0Z" />
-                            </svg>
-                            {inc.location}
-                          </span>
-                          <span className="flex items-center gap-1">
-                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M9.568 3H5.25A2.25 2.25 0 0 0 3 5.25v4.318c0 .597.237 1.17.659 1.591l9.581 9.581c.699.699 1.78.872 2.607.33a18.095 18.095 0 0 0 5.223-5.223c.542-.827.369-1.908-.33-2.607L11.16 3.66A2.25 2.25 0 0 0 9.568 3Z" />
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M6 6h.008v.008H6V6Z" />
-                            </svg>
-                            {inc.category}
-                          </span>
-                          {team && (
-                            <span className="flex items-center gap-1">
-                              {team.emoji} {team.name}
-                            </span>
-                          )}
-                          <span>{timeAgo(inc.created_at)}</span>
-                        </div>
-                      </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 1, minWidth: 0 }}>
+                      <span style={{ color: COLORS.success }}>{Icons.check}</span>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: COLORS.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {inc.title}
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0, fontSize: 12, color: COLORS.textMuted }}>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                        {Icons.calendar}
+                        {inc.resolved_at ? `${formatDate(inc.resolved_at)} • ${formatTime(inc.resolved_at)}` : '—'}
+                      </span>
+                      <span style={{
+                        padding: '3px 10px', borderRadius: 8,
+                        background: '#D1FAE5', color: '#059669',
+                        fontSize: 11, fontWeight: 600,
+                      }}>Resolved</span>
+                      <span style={{ color: COLORS.gold, opacity: 0.6 }}>{Icons.chevronRight}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </div>
 
-                      {/* Right */}
-                      <div className="flex flex-col items-end gap-2 flex-shrink-0">
-                        <span className={`text-xs px-2.5 py-1 rounded-full font-bold border ${sc.bg} ${sc.color} ${sc.border}`}>
-                          {sc.label}
-                        </span>
-                        {inc.status !== 'RESOLVED' && (
-                          <span className={`font-mono text-sm font-bold ${inc.isOverdue ? 'text-rose-400' : 'text-sky-400'}`}>
-                            {inc.isOverdue ? 'OVERDUE' : formatCountdown(inc.remainingSeconds)}
-                          </span>
-                        )}
+          {/* ═══════════════════════════════════════════════════
+             RIGHT COLUMN
+             ═══════════════════════════════════════════════════ */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+
+            {/* ── My Team ─────────────────────────────────────── */}
+            <section style={{
+              background: COLORS.cardBg,
+              borderRadius: 16,
+              border: `1px solid ${COLORS.border}`,
+              boxShadow: '0 4px 16px rgba(139,100,60,0.08)',
+              overflow: 'hidden',
+            }}>
+              <img 
+                src="/images/magellan_banner.jpg" 
+                alt="Warden Magellan" 
+                style={{ width: '100%', height: 180, objectFit: 'cover', borderBottom: `2px solid ${COLORS.gold}` }} 
+              />
+              <div style={{
+                padding: '16px 20px',
+                borderBottom: `1px solid ${COLORS.borderLight}`,
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                background: `#ffffff`, // White background as in screenshot
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <svg width="20" height="20" fill={COLORS.navy} viewBox="0 0 24 24">
+                    <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
+                  </svg>
+                  <h2 style={{ fontFamily: 'serif', fontSize: 22, color: COLORS.navy, margin: 0, fontWeight: 'bold' }}>
+                    My Team
+                  </h2>
+                </div>
+                <button style={{
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  padding: '6px 14px', borderRadius: 8,
+                  background: 'rgba(99, 102, 241, 0.1)', border: '1px solid rgba(99, 102, 241, 0.2)',
+                  color: '#4338ca', fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                }}>
+                  <svg width="12" height="12" fill="currentColor" viewBox="0 0 20 20">
+                    <path d="M13.586 3.586a2 2 0 112.828 2.828l-.793.793-2.828-2.828.793-.793zM11.379 5.793L3 14.172V17h2.828l8.38-8.379-2.83-2.828z"></path>
+                  </svg>
+                  Edit Team
+                </button>
+              </div>
+
+              <div style={{ padding: '16px 20px' }}>
+                {!teams ? (
+                  <SkeletonStat />
+                ) : myTeam ? (
+                  <>
+                    <div style={{
+                      background: COLORS.parchment,
+                      borderRadius: 10,
+                      padding: '12px 16px',
+                      border: `1px solid ${COLORS.borderLight}`,
+                      marginBottom: 16,
+                    }}>
+                      <span style={{ fontSize: 12, color: COLORS.textMuted, fontWeight: 600 }}>Team: </span>
+                      <span style={{ fontSize: 14, fontWeight: 700, color: COLORS.text }}>
+                        {myTeam.emoji} {myTeam.name}
+                      </span>
+                    </div>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                      <div style={{ textAlign: 'center', padding: 12, background: COLORS.parchment, borderRadius: 10, border: `1px solid ${COLORS.borderLight}` }}>
+                        <div style={{ color: COLORS.navy, marginBottom: 4 }}>{Icons.team}</div>
+                        <p style={{ fontSize: 11, color: COLORS.textMuted, marginBottom: 2 }}>Tier</p>
+                        <p style={{ fontSize: 16, fontWeight: 700, color: COLORS.text }}>{myTeam.tier}</p>
+                      </div>
+                      <div style={{ textAlign: 'center', padding: 12, background: COLORS.parchment, borderRadius: 10, border: `1px solid ${COLORS.borderLight}` }}>
+                        <div style={{ marginBottom: 4, fontSize: 18 }}>{myTeam.emoji}</div>
+                        <p style={{ fontSize: 11, color: COLORS.textMuted, marginBottom: 2 }}>Symbol</p>
+                        <p style={{ fontSize: 16, fontWeight: 700, color: COLORS.text }}>{myTeam.emoji}</p>
                       </div>
                     </div>
 
-                    {/* Inline quick actions (non-modal) */}
-                    {inc.status !== 'RESOLVED' && (
-                      <div className="flex items-center gap-2 mt-3 pt-3 border-t border-gray-700/20">
-                        {!inc.team_id && (
-                          <select
-                            className="bg-gray-800/60 border border-gray-700/40 text-gray-300 rounded-lg px-2 py-1.5 text-xs focus:border-sky-500/50 focus:outline-none"
-                            defaultValue=""
-                            onClick={e => e.stopPropagation()}
-                            onChange={e => {
-                              e.stopPropagation();
-                              const v = parseInt(e.target.value, 10);
-                              if (v) assignMutation.mutate({ id: inc.id, teamId: v });
-                            }}
-                          >
-                            <option value="" disabled>Assign...</option>
-                            {teams?.map(t => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
-                          </select>
-                        )}
-                        {inc.status === 'ASSIGNED' && (
-                          <button
-                            onClick={e => { e.stopPropagation(); statusMutation.mutate({ id: inc.id, status: 'IN_PROGRESS' }); }}
-                            className="bg-orange-600/15 hover:bg-orange-600/25 text-orange-300 border border-orange-500/30 rounded-lg px-3 py-1.5 text-xs font-bold transition-colors"
-                          >
-                            ▶ Start
-                          </button>
-                        )}
-                        {(inc.status === 'IN_PROGRESS' || inc.status === 'ASSIGNED') && (
-                          <button
-                            onClick={e => { e.stopPropagation(); resolveMutation.mutate(inc.id); }}
-                            className="bg-emerald-600/15 hover:bg-emerald-600/25 text-emerald-300 border border-emerald-500/30 rounded-lg px-3 py-1.5 text-xs font-bold transition-colors"
-                          >
-                            ✓ Resolve
-                          </button>
-                        )}
+                    {/* Other teams */}
+                    {teams.length > 1 && (
+                      <div style={{ marginTop: 12 }}>
+                        <p style={{ fontSize: 10, color: COLORS.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 }}>All Teams</p>
+                        {teams.map(t => (
+                          <div key={t.id} style={{
+                            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                            padding: '6px 0', borderBottom: `1px solid ${COLORS.borderLight}`,
+                            fontSize: 12, color: COLORS.text,
+                          }}>
+                            <span>{t.emoji} {t.name}</span>
+                            <span style={{ fontSize: 11, color: COLORS.textMuted }}>Tier {t.tier}</span>
+                          </div>
+                        ))}
                       </div>
                     )}
+                  </>
+                ) : (
+                  <p style={{ textAlign: 'center', padding: 20, fontSize: 13, color: COLORS.textMuted }}>
+                    Team information couldn't be loaded.
+                  </p>
+                )}
+              </div>
+            </section>
+
+            {/* ── Today's Work ─────────────────────────────────── */}
+            <section style={{
+              background: COLORS.cardBg,
+              borderRadius: 16,
+              border: `1px solid ${COLORS.border}`,
+              boxShadow: '0 4px 16px rgba(139,100,60,0.08)',
+              overflow: 'hidden',
+            }}>
+              <div style={{
+                padding: '16px 20px',
+                borderBottom: `1px solid ${COLORS.borderLight}`,
+                display: 'flex', alignItems: 'center', gap: 10,
+                background: `${COLORS.parchment}80`,
+              }}>
+                <span style={{ fontSize: 22 }}>📊</span>
+                <h2 style={{ fontFamily: '"Pirata One", cursive', fontSize: 20, color: COLORS.navy, margin: 0 }}>
+                  Today's Work
+                </h2>
+              </div>
+
+              <div style={{ padding: '16px 20px', display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 10 }}>
+                {stats ? (
+                  <>
+                    {[
+                      { label: 'Urgent', value: urgentCount, icon: '🚨', color: COLORS.critical },
+                      { label: 'In Progress', value: inProgressCount, icon: '🔧', color: '#F59E0B' },
+                      { label: 'Awaiting\nUpdate', value: awaitingCount, icon: '⏳', color: COLORS.purple },
+                      { label: 'Resolved', value: resolvedTodayCount, icon: '✅', color: COLORS.success },
+                    ].map(stat => (
+                      <div key={stat.label} style={{
+                        textAlign: 'center',
+                        padding: '14px 8px',
+                        background: COLORS.parchment,
+                        borderRadius: 10,
+                        border: `1px solid ${COLORS.borderLight}`,
+                      }}>
+                        <span style={{ fontSize: 22, display: 'block', marginBottom: 4 }}>{stat.icon}</span>
+                        <p style={{ fontSize: 26, fontWeight: 800, color: stat.color, margin: '4px 0', fontFamily: '"Pirata One", cursive' }}>
+                          {stat.value}
+                        </p>
+                        <p style={{ fontSize: 10, color: COLORS.textMuted, whiteSpace: 'pre-line', lineHeight: 1.3 }}>
+                          {stat.label}
+                        </p>
+                      </div>
+                    ))}
+                  </>
+                ) : (
+                  <>
+                    <SkeletonStat /><SkeletonStat /><SkeletonStat /><SkeletonStat />
+                  </>
+                )}
+              </div>
+            </section>
+
+            {/* ── Quick Filters ────────────────────────────────── */}
+            <section style={{
+              background: COLORS.cardBg,
+              borderRadius: 16,
+              border: `1px solid ${COLORS.border}`,
+              boxShadow: '0 4px 16px rgba(139,100,60,0.08)',
+              overflow: 'hidden',
+            }}>
+              <div style={{
+                padding: '16px 20px',
+                borderBottom: `1px solid ${COLORS.borderLight}`,
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                background: `${COLORS.parchment}80`,
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ color: COLORS.navy }}>{Icons.filter}</span>
+                  <h2 style={{ fontFamily: '"Pirata One", cursive', fontSize: 20, color: COLORS.navy, margin: 0 }}>
+                    Quick Filters
+                  </h2>
+                </div>
+                {hasFilters && (
+                  <button
+                    onClick={clearFilters}
+                    style={{
+                      padding: '4px 12px', borderRadius: 6,
+                      background: `${COLORS.critical}10`, border: `1px solid ${COLORS.critical}30`,
+                      color: COLORS.critical, fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                    }}
+                  >Clear</button>
+                )}
+              </div>
+
+              <div style={{ padding: '16px 20px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 }}>
+                  {/* Priority */}
+                  <div>
+                    <label style={{ fontSize: 11, color: COLORS.textMuted, fontWeight: 600, display: 'block', marginBottom: 4 }}>Priority</label>
+                    <select
+                      value={filterPriority}
+                      onChange={e => setFilterPriority(e.target.value)}
+                      className="select-styled"
+                      style={{
+                        width: '100%', padding: '8px 12px', borderRadius: 8,
+                        border: `1px solid ${COLORS.border}`, background: COLORS.cream,
+                        fontSize: 12, color: COLORS.text, cursor: 'pointer',
+                      }}
+                      aria-label="Filter by priority"
+                    >
+                      <option value="">All Priorities</option>
+                      <option value="critical">Critical</option>
+                      <option value="high">High</option>
+                      <option value="medium">Medium</option>
+                      <option value="low">Low</option>
+                    </select>
                   </div>
-                );
-              })}
-            </div>
-          )}
+
+                  {/* Status */}
+                  <div>
+                    <label style={{ fontSize: 11, color: COLORS.textMuted, fontWeight: 600, display: 'block', marginBottom: 4 }}>Status</label>
+                    <select
+                      value={filterStatus}
+                      onChange={e => setFilterStatus(e.target.value)}
+                      className="select-styled"
+                      style={{
+                        width: '100%', padding: '8px 12px', borderRadius: 8,
+                        border: `1px solid ${COLORS.border}`, background: COLORS.cream,
+                        fontSize: 12, color: COLORS.text, cursor: 'pointer',
+                      }}
+                      aria-label="Filter by status"
+                    >
+                      <option value="">All Statuses</option>
+                      <option value="REPORTED">Reported</option>
+                      <option value="ASSIGNED">Assigned</option>
+                      <option value="IN_PROGRESS">In Progress</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+                  {/* Location */}
+                  <div>
+                    <label style={{ fontSize: 11, color: COLORS.textMuted, fontWeight: 600, display: 'block', marginBottom: 4 }}>Location</label>
+                    <select
+                      value={filterLocation}
+                      onChange={e => setFilterLocation(e.target.value)}
+                      className="select-styled"
+                      style={{
+                        width: '100%', padding: '8px 12px', borderRadius: 8,
+                        border: `1px solid ${COLORS.border}`, background: COLORS.cream,
+                        fontSize: 12, color: COLORS.text, cursor: 'pointer',
+                      }}
+                      aria-label="Filter by location"
+                    >
+                      <option value="">All Locations</option>
+                      {locations.map(loc => <option key={loc} value={loc}>{loc}</option>)}
+                    </select>
+                  </div>
+
+                  {/* Keyword Search */}
+                  <div>
+                    <label style={{ fontSize: 11, color: COLORS.textMuted, fontWeight: 600, display: 'block', marginBottom: 4 }}>Keyword</label>
+                    <div style={{ position: 'relative' }}>
+                      <span style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', color: COLORS.textMuted }}>
+                        {Icons.search}
+                      </span>
+                      <input
+                        type="text"
+                        placeholder="Search..."
+                        value={searchQuery}
+                        onChange={e => setSearchQuery(e.target.value)}
+                        style={{
+                          width: '100%', padding: '8px 12px 8px 32px', borderRadius: 8,
+                          border: `1px solid ${COLORS.border}`, background: COLORS.cream,
+                          fontSize: 12, color: COLORS.text, boxSizing: 'border-box',
+                        }}
+                        aria-label="Search incidents by keyword"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            {/* ── Escalation Watch ─────────────────────────────── */}
+            <section style={{
+              background: COLORS.cardBg,
+              borderRadius: 16,
+              border: `2px solid ${escalationIncidents.length > 0 ? COLORS.critical + '60' : COLORS.border}`,
+              boxShadow: escalationIncidents.length > 0 ? `0 4px 20px ${COLORS.critical}15` : '0 4px 16px rgba(139,100,60,0.08)',
+              overflow: 'hidden',
+            }}>
+              <div style={{
+                padding: '16px 20px',
+                borderBottom: `1px solid ${COLORS.borderLight}`,
+                display: 'flex', alignItems: 'center', gap: 10,
+                background: escalationIncidents.length > 0 ? `${COLORS.critical}08` : `${COLORS.parchment}80`,
+              }}>
+                <span style={{ color: escalationIncidents.length > 0 ? COLORS.critical : COLORS.navy }}>{Icons.warning}</span>
+                <h2 style={{ fontFamily: '"Pirata One", cursive', fontSize: 20, color: COLORS.navy, margin: 0 }}>
+                  Escalation Watch
+                </h2>
+              </div>
+
+              <div style={{ padding: '16px 20px' }}>
+                {escalationIncidents.length === 0 ? (
+                  <p style={{ textAlign: 'center', padding: '16px', fontSize: 13, color: COLORS.textMuted }}>
+                    No incidents currently approaching SLA breach.
+                  </p>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                    <div style={{
+                      background: `${COLORS.critical}10`,
+                      borderRadius: 10,
+                      padding: 14,
+                      border: `1px solid ${COLORS.critical}30`,
+                    }}>
+                      <p style={{ fontSize: 13, fontWeight: 700, color: COLORS.critical, marginBottom: 4 }}>
+                        {escalationIncidents.length} incident{escalationIncidents.length !== 1 ? 's' : ''} nearing SLA breach
+                      </p>
+
+                      {escalationIncidents.slice(0, 3).map(inc => {
+                        const totalDuration = (new Date(inc.deadline_at).getTime() - new Date(inc.created_at).getTime()) / 1000;
+                        return (
+                          <div key={inc.id} style={{
+                            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                            padding: '8px 0',
+                            borderTop: `1px solid ${COLORS.critical}15`,
+                          }}>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <p style={{ fontSize: 12, fontWeight: 600, color: COLORS.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {inc.title}
+                              </p>
+                              <p style={{ fontSize: 11, color: COLORS.textMuted }}>
+                                SLA threshold: {formatSLADuration(totalDuration)} | Time remaining: <span style={{ color: COLORS.critical, fontWeight: 700, fontFamily: 'monospace' }}>
+                                  {formatCountdown(Math.max(0, inc.remainingSeconds))}
+                                </span>
+                              </p>
+                            </div>
+                            <button
+                              onClick={() => openDetail(inc)}
+                              style={{
+                                padding: '4px 12px', borderRadius: 6,
+                                background: COLORS.navy, border: 'none',
+                                color: '#fff', fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                                whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 4,
+                              }}
+                            >View Incident →</button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </section>
+
+          </div>
         </div>
       </main>
 
-      {/* ── Detail Modal ───────────────────────────────────── */}
+      {/* ═══════════════════════════════════════════════════════
+         INCIDENT DETAIL MODAL
+         ═══════════════════════════════════════════════════════ */}
       {selectedIncident && (
         <IncidentDetailModal
           incident={selectedIncident}

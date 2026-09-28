@@ -23,31 +23,34 @@ const TEAMS = [
 
 // ── Seed runner ─────────────────────────────────────────────
 
-export function seed(): void {
+export async function seed(): Promise<void> {
   const db = getDb();
-  migrate(db);
+  await migrate(db);
 
-  const run = db.transaction(() => {
+  const client = await db.connect();
+  
+  try {
+    await client.query('BEGIN');
+    
     // Clear existing data (reverse dependency order)
-    db.exec('DELETE FROM incident_events');
-    db.exec('DELETE FROM incidents');
-    db.exec('DELETE FROM sla_config');
-    db.exec('DELETE FROM teams');
+    await client.query('DELETE FROM incident_events');
+    await client.query('DELETE FROM incidents');
+    await client.query('DELETE FROM sla_config');
+    await client.query('DELETE FROM teams');
 
     // ── SLA config ──────────────────────────────────────────
-    const insertSla = db.prepare('INSERT INTO sla_config (level, minutes) VALUES (?, ?)');
     for (const [level, minutes] of Object.entries(SLA_MINUTES)) {
-      insertSla.run(parseInt(level), minutes);
+      await client.query('INSERT INTO sla_config (level, minutes) VALUES ($1, $2)', [parseInt(level), minutes]);
     }
 
     // ── Teams ───────────────────────────────────────────────
-    const insertTeam = db.prepare('INSERT INTO teams (name, tier, emoji) VALUES (?, ?, ?)');
     for (const t of TEAMS) {
-      insertTeam.run(t.name, t.tier, t.emoji);
+      await client.query('INSERT INTO teams (name, tier, emoji) VALUES ($1, $2, $3)', [t.name, t.tier, t.emoji]);
     }
 
     // Build team-name → id lookup
-    const teamRows = db.prepare('SELECT id, name FROM teams').all() as { id: number; name: string }[];
+    const teamsRes = await client.query('SELECT id, name FROM teams');
+    const teamRows = teamsRes.rows;
     const teamId = (name: string) => {
       const row = teamRows.find((r) => r.name === name);
       if (!row) throw new Error(`Team not found: ${name}`);
@@ -55,23 +58,24 @@ export function seed(): void {
     };
 
     // ── Incidents ───────────────────────────────────────────
-    const insertIncident = db.prepare(`
+    const insertIncidentQuery = `
       INSERT INTO incidents
         (title, description, category, level, status, team_id, tier,
          reporter, location, occurred_at, created_at, deadline_at, resolved_at, escalated_at,
          buster_called_at, escalation_count, version)
       VALUES
-        (@title, @description, @category, @level, @status, @teamId, @tier,
-         @reporter, @location, @occurredAt, @createdAt, @deadlineAt, @resolvedAt, @escalatedAt,
-         @busterCalledAt, @escalationCount, @version)
-    `);
+        ($1, $2, $3, $4, $5, $6, $7,
+         $8, $9, $10, $11, $12, $13, $14,
+         $15, $16, $17)
+      RETURNING id
+    `;
 
-    const insertEvent = db.prepare(`
+    const insertEventQuery = `
       INSERT INTO incident_events
         (incident_id, type, actor, from_value, to_value, message, at)
       VALUES
-        (@incidentId, @type, @actor, @fromValue, @toValue, @message, @at)
-    `);
+        ($1, $2, $3, $4, $5, $6, $7)
+    `;
 
     const now = Date.now();
     const iso = (ms: number) => new Date(ms).toISOString();
@@ -273,110 +277,117 @@ export function seed(): void {
       const busterCalledAt = inc.busterCalledAgoMin !== null ? now - inc.busterCalledAgoMin * MIN : null;
       const occurredAt = inc.occurredAgoMin !== undefined ? now - inc.occurredAgoMin * MIN : createdAt;
 
-      const result = insertIncident.run({
-        title: inc.title,
-        description: inc.description,
-        category: inc.category,
-        level: inc.level,
-        status: inc.status,
-        teamId: inc.teamName ? teamId(inc.teamName) : null,
-        tier: inc.tier,
-        reporter: inc.reporter,
-        location: inc.location || 'Unknown Location',
-        occurredAt: iso(occurredAt),
-        createdAt: iso(createdAt),
-        deadlineAt: iso(deadlineAt),
-        resolvedAt: resolvedAt ? iso(resolvedAt) : null,
-        escalatedAt: escalatedAt ? iso(escalatedAt) : null,
-        busterCalledAt: busterCalledAt ? iso(busterCalledAt) : null,
-        escalationCount: inc.escalationCount,
-        version: 1 + inc.escalationCount + (inc.status !== Status.REPORTED ? 1 : 0),
-      });
+      const incidentRes = await client.query(insertIncidentQuery, [
+        inc.title,
+        inc.description,
+        inc.category,
+        inc.level,
+        inc.status,
+        inc.teamName ? teamId(inc.teamName) : null,
+        inc.tier,
+        inc.reporter,
+        inc.location || 'Unknown Location',
+        iso(occurredAt),
+        iso(createdAt),
+        iso(deadlineAt),
+        resolvedAt ? iso(resolvedAt) : null,
+        escalatedAt ? iso(escalatedAt) : null,
+        busterCalledAt ? iso(busterCalledAt) : null,
+        inc.escalationCount,
+        1 + inc.escalationCount + (inc.status !== Status.REPORTED ? 1 : 0),
+      ]);
 
-      const incidentId = result.lastInsertRowid;
+      const incidentId = incidentRes.rows[0].id;
 
       // CREATED event
-      insertEvent.run({
+      await client.query(insertEventQuery, [
         incidentId,
-        type: EventType.CREATED,
-        actor: inc.reporter,
-        fromValue: null,
-        toValue: Status.REPORTED,
-        message: `Incident reported: ${inc.title}`,
-        at: iso(createdAt),
-      });
+        EventType.CREATED,
+        inc.reporter,
+        null,
+        Status.REPORTED,
+        `Incident reported: ${inc.title}`,
+        iso(createdAt),
+      ]);
 
       // Status-change events
       if (inc.status !== Status.REPORTED) {
         if (inc.status === Status.ASSIGNED || inc.status === Status.IN_PROGRESS || inc.status === Status.RESOLVED) {
-          insertEvent.run({
+          await client.query(insertEventQuery, [
             incidentId,
-            type: EventType.STATUS_CHANGED,
-            actor: 'system',
-            fromValue: Status.REPORTED,
-            toValue: Status.ASSIGNED,
-            message: `Assigned to ${inc.teamName ?? 'unassigned'}`,
-            at: iso(createdAt + 10_000),
-          });
+            EventType.STATUS_CHANGED,
+            'system',
+            Status.REPORTED,
+            Status.ASSIGNED,
+            `Assigned to ${inc.teamName ?? 'unassigned'}`,
+            iso(createdAt + 10_000),
+          ]);
         }
         if (inc.status === Status.IN_PROGRESS || inc.status === Status.RESOLVED) {
-          insertEvent.run({
+          await client.query(insertEventQuery, [
             incidentId,
-            type: EventType.STATUS_CHANGED,
-            actor: 'system',
-            fromValue: Status.ASSIGNED,
-            toValue: Status.IN_PROGRESS,
-            message: 'Work in progress',
-            at: iso(createdAt + 30_000),
-          });
+            EventType.STATUS_CHANGED,
+            'system',
+            Status.ASSIGNED,
+            Status.IN_PROGRESS,
+            'Work in progress',
+            iso(createdAt + 30_000),
+          ]);
         }
         if (inc.status === Status.RESOLVED && resolvedAt) {
-          insertEvent.run({
+          await client.query(insertEventQuery, [
             incidentId,
-            type: EventType.RESOLVED,
-            actor: inc.reporter,
-            fromValue: Status.IN_PROGRESS,
-            toValue: Status.RESOLVED,
-            message: 'Incident resolved',
-            at: iso(resolvedAt),
-          });
+            EventType.RESOLVED,
+            inc.reporter,
+            Status.IN_PROGRESS,
+            Status.RESOLVED,
+            'Incident resolved',
+            iso(resolvedAt),
+          ]);
         }
       }
 
       // Escalation events
       if (inc.escalationCount > 0 && escalatedAt) {
         for (let t = 1; t <= inc.escalationCount && t <= inc.tier; t++) {
-          insertEvent.run({
+          await client.query(insertEventQuery, [
             incidentId,
-            type: EventType.AUTO_ESCALATED,
-            actor: 'escalation-engine',
-            fromValue: `tier-${t - 1}`,
-            toValue: `tier-${t}`,
-            message: `Auto-escalated to tier ${t}`,
-            at: iso(escalatedAt - (inc.escalationCount - t) * 2 * MIN),
-          });
+            EventType.AUTO_ESCALATED,
+            'escalation-engine',
+            `tier-${t - 1}`,
+            `tier-${t}`,
+            `Auto-escalated to tier ${t}`,
+            iso(escalatedAt - (inc.escalationCount - t) * 2 * MIN),
+          ]);
         }
       }
 
       // Buster Call event
       if (busterCalledAt) {
-        insertEvent.run({
+        await client.query(insertEventQuery, [
           incidentId,
-          type: EventType.BUSTER_CALL,
-          actor: 'escalation-engine',
-          fromValue: null,
-          toValue: 'BUSTER_CALL',
-          message: '🔱 BUSTER CALL INITIATED — Fleet Admiral Akainu authorised',
-          at: iso(busterCalledAt),
-        });
+          EventType.BUSTER_CALL,
+          'escalation-engine',
+          null,
+          'BUSTER_CALL',
+          '🔱 BUSTER CALL INITIATED — Fleet Admiral Akainu authorised',
+          iso(busterCalledAt),
+        ]);
       }
     }
-  });
+    
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('Seeding failed:', e);
+  } finally {
+    client.release();
+  }
 
-  run();
   console.log(`🌊 Seeded ${TEAMS.length} teams + 15 incidents with events`);
 }
 
 // ── Run if executed directly ────────────────────────────────
-seed();
-closeDb();
+if (import.meta.url === `file://${process.argv[1]}`) {
+  seed().then(closeDb).catch(console.error);
+}

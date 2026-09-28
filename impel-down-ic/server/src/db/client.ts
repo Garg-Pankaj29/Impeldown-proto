@@ -1,33 +1,31 @@
 // DB client setup
 // Follows docs/architecture.md
 
-import Database from 'better-sqlite3';
-import path from 'node:path';
-import fs from 'node:fs';
+import { Pool } from 'pg';
 import { config } from '../config/env';
 
-let db: Database.Database | null = null;
+let pool: Pool | null = null;
 
 /** Get (or create) the singleton DB connection */
-export function getDb(): Database.Database {
-  if (!db) {
-    const dbPath = path.resolve(process.cwd(), config.DB_PATH);
-    const dbDir = path.dirname(dbPath);
-    if (!fs.existsSync(dbDir)) {
-      fs.mkdirSync(dbDir, { recursive: true });
-    }
-    db = new Database(dbPath);
-    db.pragma('journal_mode = WAL');
-    db.pragma('foreign_keys = ON');
+export function getDb(): Pool {
+  if (!pool) {
+    pool = new Pool({
+      connectionString: config.DATABASE_URL,
+    });
+    
+    // Test the connection
+    pool.query('SELECT NOW()').catch(err => {
+      console.error('Failed to connect to PostgreSQL', err);
+    });
   }
-  return db;
+  return pool;
 }
 
 /** Close the singleton DB connection */
-export function closeDb(): void {
-  if (db) {
-    db.close();
-    db = null;
+export async function closeDb(): Promise<void> {
+  if (pool) {
+    await pool.end();
+    pool = null;
   }
 }
 

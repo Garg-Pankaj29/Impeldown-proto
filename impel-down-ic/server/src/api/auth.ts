@@ -19,7 +19,7 @@ const verifyPassword = (password: string, hash: string): boolean => {
   return key === derivedKey;
 };
 
-authRouter.post('/register', (req: Request, res: Response) => {
+authRouter.post('/register', async (req: Request, res: Response) => {
   const { email, password, role, name } = req.body;
   
   if (!email || !password || !role) {
@@ -30,10 +30,6 @@ authRouter.post('/register', (req: Request, res: Response) => {
   
   try {
     const password_hash = hashPassword(password);
-    const stmt = db.prepare(`
-      INSERT INTO users (email, password_hash, role, name)
-      VALUES (?, ?, ?, ?)
-    `);
     
     // Auto-generate name based on role if missing
     const nameMap: Record<string, string> = {
@@ -43,21 +39,27 @@ authRouter.post('/register', (req: Request, res: Response) => {
     };
     const finalName = name || nameMap[role] || 'User';
 
-    const info = stmt.run(email, password_hash, role, finalName);
+    const result = await db.query(`
+      INSERT INTO users (email, password_hash, role, name)
+      VALUES ($1, $2, $3, $4)
+      RETURNING id
+    `, [email, password_hash, role, finalName]);
+    
+    const newUserId = result.rows[0].id;
     
     // Generate JWT token
     const token = jwt.sign(
-      { id: info.lastInsertRowid, email, role, name: finalName }, 
+      { id: newUserId, email, role, name: finalName }, 
       process.env.JWT_SECRET || 'impel-down-secret-key-123',
       { expiresIn: '24h' }
     );
     
     res.status(201).json({
-      user: { id: info.lastInsertRowid, email, role, name: finalName },
+      user: { id: newUserId, email, role, name: finalName },
       token
     });
   } catch (err: any) {
-    if (err.message.includes('UNIQUE constraint failed')) {
+    if (err.code === '23505') { // PostgreSQL unique constraint violation
       return res.status(409).json({ error: 'Email already exists' });
     }
     console.error(err);
@@ -65,7 +67,7 @@ authRouter.post('/register', (req: Request, res: Response) => {
   }
 });
 
-authRouter.post('/login', (req: Request, res: Response) => {
+authRouter.post('/login', async (req: Request, res: Response) => {
   const { email, password } = req.body;
   
   if (!email || !password) {
@@ -73,7 +75,10 @@ authRouter.post('/login', (req: Request, res: Response) => {
   }
 
   const db = getDb();
-  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(email) as any;
+  
+  try {
+    const result = await db.query('SELECT * FROM users WHERE email = $1', [email]);
+    const user = result.rows[0];
   
   if (!user || !verifyPassword(password, user.password_hash)) {
     return res.status(401).json({ error: 'Invalid credentials' });
@@ -89,4 +94,61 @@ authRouter.post('/login', (req: Request, res: Response) => {
     user: { id: user.id, email: user.email, role: user.role, name: user.name },
     token
   });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+authRouter.post('/register-responder', async (req: Request, res: Response) => {
+  const { email, password, fullName, teamId, skills, availability, location, contactNumber, motivation } = req.body;
+  
+  if (!email || !password || !fullName) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+
+  const db = getDb();
+  
+  try {
+    const password_hash = hashPassword(password);
+    
+    // 1. Create user
+    const userResult = await db.query(`
+      INSERT INTO users (email, password_hash, role, name)
+      VALUES ($1, $2, $3, $4)
+      RETURNING id
+    `, [email, password_hash, 'responder', fullName]);
+    
+    const newUserId = userResult.rows[0].id;
+
+    // 2. Insert response team details
+    await db.query(`
+      INSERT INTO response_team_details (team_id, specialty, shift, contact_number, notes)
+      VALUES ($1, $2, $3, $4, $5)
+    `, [
+      teamId ? parseInt(teamId, 10) : null,
+      skills ? JSON.stringify(skills) : null,
+      availability || null,
+      contactNumber || null,
+      motivation || null
+    ]);
+    
+    // Generate JWT token
+    const token = jwt.sign(
+      { id: newUserId, email, role: 'responder', name: fullName }, 
+      process.env.JWT_SECRET || 'impel-down-secret-key-123',
+      { expiresIn: '24h' }
+    );
+    
+    res.status(201).json({
+      user: { id: newUserId, email, role: 'responder', name: fullName },
+      token
+    });
+  } catch (err: any) {
+    if (err.code === '23505') {
+      return res.status(409).json({ error: 'Email already exists' });
+    }
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
