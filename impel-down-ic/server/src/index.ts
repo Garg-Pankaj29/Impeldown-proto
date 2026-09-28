@@ -47,23 +47,34 @@ app.get('/api/health', (_req, res) => {
 
 app.use(errorHandler);
 
-// ── Frontend Serving (Production) ───────────────────────────
+// ── Frontend Serving (Optional / Monorepo) ───────────────────
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Serve static files from the React frontend app
 const clientBuildPath = path.join(__dirname, '../../client/dist');
-app.use(express.static(clientBuildPath));
+const indexHtmlPath = path.join(clientBuildPath, 'index.html');
 
-// Catch-all route to serve index.html for React Router
-app.get('*', (req, res) => {
-  if (!req.path.startsWith('/api')) {
-    res.sendFile(path.join(clientBuildPath, 'index.html'));
-  }
-});
+if (fs.existsSync(indexHtmlPath)) {
+  app.use(express.static(clientBuildPath));
+  app.get('*', (req, res) => {
+    if (!req.path.startsWith('/api')) {
+      res.sendFile(indexHtmlPath);
+    }
+  });
+} else {
+  app.get('/', (_req, res) => {
+    res.json({
+      service: 'Impel Down Command Center Backend API',
+      status: 'online',
+      version: '1.0.0',
+      health: '/api/health',
+    });
+  });
+}
 // ── Start ───────────────────────────────────────────────────
 import { ticker } from './services/scheduler';
 import { migrate } from './db/migrate';
