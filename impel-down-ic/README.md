@@ -15,7 +15,7 @@ npm run dev          # starts server (:4000) + client (:5173)
 
 | Workspace | Port | Stack |
 |-----------|------|-------|
-| `server/` | 4000 | Node 20, Express, TypeScript, SQLite |
+| `server/` | 4000 | Node 20, Express, TypeScript, PostgreSQL |
 | `client/` | 5173 | React 18, Vite, Tailwind CSS, TypeScript |
 
 ## Scripts
