@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Icon Mapper</title>
+  <style>
+    body { font-family: sans-serif; background: #1e1e1e; color: white; padding: 20px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 15px; }
+    .card { background: #2d2d2d; padding: 10px; border-radius: 8px; text-align: center; }
+    .card img { max-width: 100%; max-height: 100px; object-fit: contain; margin-bottom: 10px; background: #fff; border-radius: 4px; }
+    .card select { width: 100%; padding: 5px; }
+    #output { margin-top: 30px; background: #000; padding: 15px; font-family: monospace; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h2>Map the Extracted Icons</h2>
+  <p>Please select the correct name for each icon below. The ones you select will be output at the bottom. Copy the JSON at the bottom and paste it back to the chat so I can apply them!</p>
+  
+  <div class="grid" id="grid"></div>
+  
+  <div id="output">{}</div>
+
+  <script>
+    const expectedIcons = [
+      "", "logo.png", "avatar_reporter.png", "flag_post.png", "icon_track_reports.png", 
+      "icon_announcements.png", "icon_help.png", "seagull.png", "form_hat.png", "form_sign.png", 
+      "form_map.png", "form_compass.png", "form_quill.png", "form_picture.png", "form_ship_btn.png", 
+      "list_logbook.png", "cat_cell.png", "cat_poison.png", "cat_escape.png", "cat_seaking.png", 
+      "cat_seastone.png", "cat_gate.png", "cat_invasion.png", "stat_anchor.png", "stat_wanted.png", 
+      "stat_compass.png", "stat_flag_green.png", "stat_flag_red.png", "stat_ship.png", "empty_bottle.png"
+    ];
+
+    const mapping = {};
+    const grid = document.getElementById('grid');
+    const output = document.getElementById('output');
+
+    // We have 33 icons (0 to 32)
+    for (let i = 0; i < 33; i++) {
+      const card = document.createElement('div');
+      card.className = 'card';
+      
+      const img = document.createElement('img');
+      img.src = `http://localhost:5173/images/extracted_icons/icon_${i}.png`;
+
+      const select = document.createElement('select');
+      expectedIcons.forEach(name => {
+        const opt = document.createElement('option');
+        opt.value = name;
+        opt.textContent = name || "-- Select Icon --";
+        select.appendChild(opt);
+      });
+
+      select.addEventListener('change', (e) => {
+        if (e.target.value) {
+          mapping[`icon_${i}.png`] = e.target.value;
+        } else {
+          delete mapping[`icon_${i}.png`];
+        }
+        output.textContent = JSON.stringify(mapping, null, 2);
+      });
+
+      card.appendChild(img);
+      card.appendChild(select);
+      grid.appendChild(card);
+    }
+  </script>
+</body>
+</html>
